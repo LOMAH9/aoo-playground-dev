@@ -1,0 +1,321 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "apim_base_url":    { "type": "String" },
+      "environment_name": { "type": "String" }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "method": "POST",
+          "schema": {
+            "type": "object",
+            "required": ["correlationId","policyReference","productLine","coverageLines","totalSumInsured","currency","riskScore"],
+            "properties": {
+              "correlationId":   { "type": "string" },
+              "policyReference": { "type": "string" },
+              "productLine":     { "type": "string" },
+              "coverageLines":   { "type": "array" },
+              "totalSumInsured": { "type": "number" },
+              "currency":        { "type": "string" },
+              "riskScore":       { "type": "number" },
+              "inceptionDate":   { "type": "string" },
+              "expiryDate":      { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "Validate_Input": {
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@triggerBody()",
+          "schema": {
+            "type": "object",
+            "required": ["correlationId","policyReference","productLine","totalSumInsured","currency"],
+            "properties": {
+              "correlationId":   { "type": "string" },
+              "policyReference": { "type": "string" },
+              "productLine":     { "type": "string" },
+              "totalSumInsured": { "type": "number" },
+              "currency":        { "type": "string" },
+              "riskScore":       { "type": "number" }
+            }
+          }
+        }
+      },
+      "Initialize_QuoteLines": {
+        "type": "InitializeVariable",
+        "runAfter": { "Validate_Input": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "finalQuoteLines", "type": "array", "value": [] }]
+        }
+      },
+      "Initialize_SelectedQuote": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_QuoteLines": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "selectedMarketType", "type": "string", "value": "PRIMARY" }]
+        }
+      },
+      "Primary_Quote_Request": {
+        "type": "Http",
+        "runAfter": { "Initialize_SelectedQuote": ["Succeeded"] },
+        "inputs": {
+          "method": "POST",
+          "uri": "@{concat(parameters('apim_base_url'), '/api/v1/quotes/generate')}",
+          "headers": {
+            "Content-Type":     "application/json",
+            "X-Correlation-ID": "@triggerBody()?['correlationId']",
+            "X-API-Version":    "2024-01"
+          },
+          "body": {
+            "policyReference": "@triggerBody()?['policyReference']",
+            "coverageLines":   "@triggerBody()?['coverageLines']",
+            "totalSumInsured": "@triggerBody()?['totalSumInsured']",
+            "currency":        "@triggerBody()?['currency']",
+            "productLine":     "@triggerBody()?['productLine']",
+            "riskScore":       "@triggerBody()?['riskScore']",
+            "inceptionDate":   "@triggerBody()?['inceptionDate']",
+            "expiryDate":      "@triggerBody()?['expiryDate']",
+            "marketType":      "PRIMARY"
+          },
+          "retryPolicy": {
+            "type": "exponential",
+            "count": 3,
+            "interval": "PT30S",
+            "minimumInterval": "PT30S",
+            "maximumInterval": "PT5M"
+          }
+        }
+      },
+      "Alternative_Quote_Request": {
+        "type": "Http",
+        "runAfter": { "Initialize_SelectedQuote": ["Succeeded"] },
+        "inputs": {
+          "method": "POST",
+          "uri": "@{concat(parameters('apim_base_url'), '/api/v1/quotes/generate-alternative')}",
+          "headers": {
+            "Content-Type":     "application/json",
+            "X-Correlation-ID": "@triggerBody()?['correlationId']",
+            "X-API-Version":    "2024-01"
+          },
+          "body": {
+            "policyReference": "@triggerBody()?['policyReference']",
+            "coverageLines":   "@triggerBody()?['coverageLines']",
+            "totalSumInsured": "@triggerBody()?['totalSumInsured']",
+            "currency":        "@triggerBody()?['currency']",
+            "productLine":     "@triggerBody()?['productLine']",
+            "riskScore":       "@triggerBody()?['riskScore']",
+            "inceptionDate":   "@triggerBody()?['inceptionDate']",
+            "expiryDate":      "@triggerBody()?['expiryDate']",
+            "marketType":      "SECONDARY"
+          },
+          "retryPolicy": {
+            "type": "exponential",
+            "count": 3,
+            "interval": "PT30S",
+            "minimumInterval": "PT30S",
+            "maximumInterval": "PT5M"
+          }
+        }
+      },
+      "FOREACH_Coverage_In_Primary_Quote": {
+        "type": "Foreach",
+        "runAfter": {
+          "Primary_Quote_Request":      ["Succeeded"],
+          "Alternative_Quote_Request":  ["Succeeded", "Failed"]
+        },
+        "foreach": "@body('Primary_Quote_Request')?['quoteLines']",
+        "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+        "actions": {
+          "Determine_Risk_Loading": {
+            "type": "If",
+            "expression": {
+              "greater": ["@triggerBody()?['riskScore']", 75]
+            },
+            "actions": {
+              "Apply_High_Risk_Loading": {
+                "type": "Compose",
+                "inputs": { "loadingFactor": 1.25, "loadingType": "HIGH_RISK" }
+              }
+            },
+            "else": {
+              "actions": {
+                "Check_Medium_Risk": {
+                  "type": "If",
+                  "expression": {
+                    "greater": ["@triggerBody()?['riskScore']", 50]
+                  },
+                  "actions": {
+                    "Apply_Medium_Loading": {
+                      "type": "Compose",
+                      "inputs": { "loadingFactor": 1.10, "loadingType": "MEDIUM_RISK" }
+                    }
+                  },
+                  "else": {
+                    "actions": {
+                      "Apply_Standard_Loading": {
+                        "type": "Compose",
+                        "inputs": { "loadingFactor": 1.0, "loadingType": "STANDARD" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "Calculate_Final_Premium": {
+            "type": "Compose",
+            "runAfter": { "Determine_Risk_Loading": ["Succeeded"] },
+            "inputs": "@mul(items('FOREACH_Coverage_In_Primary_Quote')?['ratedPremium'], coalesce(outputs('Apply_High_Risk_Loading')?['loadingFactor'], outputs('Apply_Medium_Loading')?['loadingFactor'], outputs('Apply_Standard_Loading')?['loadingFactor'], 1.0))"
+          },
+          "Build_Final_Quote_Line": {
+            "type": "Compose",
+            "runAfter": { "Calculate_Final_Premium": ["Succeeded"] },
+            "inputs": {
+              "coverageType":  "@items('FOREACH_Coverage_In_Primary_Quote')?['coverageType']",
+              "ratedPremium":  "@items('FOREACH_Coverage_In_Primary_Quote')?['ratedPremium']",
+              "ratingBasis":   "@items('FOREACH_Coverage_In_Primary_Quote')?['ratingBasis']",
+              "ratingFactor":  "@items('FOREACH_Coverage_In_Primary_Quote')?['ratingFactor']",
+              "finalPremium":  "@outputs('Calculate_Final_Premium')",
+              "loadings": [
+                {
+                  "loadingType":   "@coalesce(outputs('Apply_High_Risk_Loading')?['loadingType'], outputs('Apply_Medium_Loading')?['loadingType'], outputs('Apply_Standard_Loading')?['loadingType'], 'STANDARD')",
+                  "loadingFactor": "@coalesce(outputs('Apply_High_Risk_Loading')?['loadingFactor'], outputs('Apply_Medium_Loading')?['loadingFactor'], outputs('Apply_Standard_Loading')?['loadingFactor'], 1.0)"
+                }
+              ]
+            }
+          },
+          "Append_Quote_Line": {
+            "type": "AppendToArrayVariable",
+            "runAfter": { "Build_Final_Quote_Line": ["Succeeded"] },
+            "inputs": {
+              "name":  "finalQuoteLines",
+              "value": "@outputs('Build_Final_Quote_Line')"
+            }
+          }
+        }
+      },
+      "Select_Best_Quote": {
+        "type": "If",
+        "runAfter": { "FOREACH_Coverage_In_Primary_Quote": ["Succeeded"] },
+        "expression": {
+          "lessOrEquals": [
+            "@body('Primary_Quote_Request')?['grossPremium']",
+            "@body('Alternative_Quote_Request')?['grossPremium']"
+          ]
+        },
+        "actions": {
+          "Use_Primary_Market": {
+            "type": "SetVariable",
+            "inputs": { "name": "selectedMarketType", "value": "PRIMARY" }
+          }
+        },
+        "else": {
+          "actions": {
+            "Use_Secondary_Market": {
+              "type": "SetVariable",
+              "inputs": { "name": "selectedMarketType", "value": "SECONDARY" }
+            }
+          }
+        }
+      },
+      "Calculate_Taxes": {
+        "type": "Compose",
+        "runAfter": { "Select_Best_Quote": ["Succeeded"] },
+        "inputs": "@mul(body('Primary_Quote_Request')?['grossPremium'], 0.12)"
+      },
+      "Determine_Quote_Status": {
+        "type": "If",
+        "runAfter": { "Calculate_Taxes": ["Succeeded"] },
+        "expression": {
+          "greater": ["@triggerBody()?['riskScore']", 90]
+        },
+        "actions": {
+          "Set_Declined": {
+            "type": "Compose",
+            "inputs": { "quoteStatus": "DECLINED", "declineReason": "Risk score exceeds maximum acceptance threshold of 90" }
+          }
+        },
+        "else": {
+          "actions": {
+            "Check_Referred": {
+              "type": "If",
+              "expression": {
+                "and": [
+                  { "greater": ["@triggerBody()?['riskScore']", 80] },
+                  { "lessOrEquals": ["@triggerBody()?['riskScore']", 90] }
+                ]
+              },
+              "actions": {
+                "Set_Referred": {
+                  "type": "Compose",
+                  "inputs": { "quoteStatus": "REFERRED", "referralReason": "Risk score between 80-90 requires senior underwriter sign-off" }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Set_Firm": {
+                    "type": "Compose",
+                    "inputs": { "quoteStatus": "FIRM", "declineReason": null }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Build_Quote_Model": {
+        "type": "Compose",
+        "runAfter": { "Determine_Quote_Status": ["Succeeded"] },
+        "inputs": {
+          "quoteId":          "@guid()",
+          "correlationId":    "@triggerBody()?['correlationId']",
+          "policyReference":  "@triggerBody()?['policyReference']",
+          "quoteStatus":      "@coalesce(outputs('Set_Declined')?['quoteStatus'], outputs('Set_Referred')?['quoteStatus'], outputs('Set_Firm')?['quoteStatus'], 'FIRM')",
+          "quotedAt":         "@utcNow()",
+          "expiresAt":        "@addDays(utcNow(), 30)",
+          "currency":         "@triggerBody()?['currency']",
+          "grossPremium":     "@body('Primary_Quote_Request')?['grossPremium']",
+          "netPremium":       "@mul(body('Primary_Quote_Request')?['grossPremium'], 0.85)",
+          "taxes":            "@outputs('Calculate_Taxes')",
+          "totalPayable":     "@add(body('Primary_Quote_Request')?['grossPremium'], outputs('Calculate_Taxes'))",
+          "marketType":       "@variables('selectedMarketType')",
+          "quoteLines":       "@variables('finalQuoteLines')",
+          "riskScore":        "@triggerBody()?['riskScore']",
+          "declineReason":    "@coalesce(outputs('Set_Declined')?['declineReason'], null)",
+          "referralReason":   "@coalesce(outputs('Set_Referred')?['referralReason'], null)",
+          "alternativeQuote": {
+            "quoteId":      "@guid()",
+            "marketType":   "SECONDARY",
+            "grossPremium": "@body('Alternative_Quote_Request')?['grossPremium']",
+            "netPremium":   "@mul(body('Alternative_Quote_Request')?['grossPremium'], 0.85)",
+            "taxes":        "@mul(body('Alternative_Quote_Request')?['grossPremium'], 0.12)",
+            "totalPayable": "@add(body('Alternative_Quote_Request')?['grossPremium'], mul(body('Alternative_Quote_Request')?['grossPremium'], 0.12))"
+          },
+          "termsAndConditions": "Standard Lloyd's market terms and conditions apply. Subject to policy wording."
+        }
+      },
+      "Response_Success": {
+        "type": "Response",
+        "runAfter": { "Build_Quote_Model": ["Succeeded"] },
+        "inputs": {
+          "statusCode": 200,
+          "headers": {
+            "Content-Type":     "application/json",
+            "X-Correlation-ID": "@triggerBody()?['correlationId']"
+          },
+          "body": "@outputs('Build_Quote_Model')"
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "kind": "Stateful"
+}

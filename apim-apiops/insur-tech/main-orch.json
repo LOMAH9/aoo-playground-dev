@@ -1,0 +1,1240 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "apim_base_url":                   { "type": "String" },
+      "confidence_score_auto_threshold":  { "type": "Float",  "defaultValue": 85.0 },
+      "confidence_score_manual_threshold":{ "type": "Float",  "defaultValue": 50.0 },
+      "enable_db_error_logging":         { "type": "Bool",   "defaultValue": true },
+      "enable_servicebus_error_routing": { "type": "Bool",   "defaultValue": true },
+      "enable_pagerduty":                { "type": "Bool",   "defaultValue": false },
+      "environment_name":                { "type": "String" },
+      "underwriting_team_email":         { "type": "String" },
+      "compliance_team_email":           { "type": "String" },
+      "submission_timeout_minutes":      { "type": "Int",    "defaultValue": 30 }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "method": "POST",
+          "relativePath": "/run",
+          "schema": {
+            "type": "object",
+            "required": ["correlationId","sourceSystem","documentType","documentName","documentContent","documentContentType","submissionTimestamp","submitterEmail","brokerCode","productLine","attemptNumber"],
+            "properties": {
+              "correlationId":       { "type": "string" },
+              "sourceSystem":        { "type": "string" },
+              "sourceReference":     { "type": "string" },
+              "documentType":        { "type": "string" },
+              "documentName":        { "type": "string" },
+              "documentContent":     { "type": "string" },
+              "documentContentType": { "type": "string" },
+              "submissionTimestamp": { "type": "string" },
+              "submitterEmail":      { "type": "string" },
+              "brokerCode":          { "type": "string" },
+              "productLine":         { "type": "string" },
+              "attemptNumber":       { "type": "integer" },
+              "metadata":            { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+
+      "Initialize_CorrelationId": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [{ "name": "correlationId", "type": "string", "value": "@coalesce(triggerBody()?['correlationId'], guid())" }]
+        }
+      },
+      "Initialize_ProcessingStartTime": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_CorrelationId": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "processingStartTime", "type": "string", "value": "@utcNow()" }]
+        }
+      },
+      "Initialize_SubmissionPath": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_ProcessingStartTime": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "submissionPath", "type": "string", "value": "STANDARD" }]
+        }
+      },
+      "Initialize_ProcessingMode": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_SubmissionPath": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "processingMode", "type": "string", "value": "unstructured" }]
+        }
+      },
+      "Initialize_PolicyId": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_ProcessingMode": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "finalPolicyId", "type": "string", "value": "" }]
+        }
+      },
+      "Initialize_QuoteId": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_PolicyId": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "finalQuoteId", "type": "string", "value": "" }]
+        }
+      },
+
+      "Idempotency_Check": {
+        "type": "Http",
+        "runAfter": { "Initialize_QuoteId": ["Succeeded"] },
+        "inputs": {
+          "method": "GET",
+          "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'), '/status')}",
+          "headers": {
+            "X-Correlation-ID": "@variables('correlationId')",
+            "X-API-Version":    "2024-01"
+          },
+          "retryPolicy": { "type": "fixed", "count": 1, "interval": "PT10S" }
+        }
+      },
+      "IF_Already_Processed": {
+        "type": "If",
+        "runAfter": { "Idempotency_Check": ["Succeeded", "Failed"] },
+        "expression": {
+          "and": [
+            { "equals": ["@outputs('Idempotency_Check')['statusCode']", 200] },
+            { "equals": ["@body('Idempotency_Check')?['status']", "COMPLETED"] }
+          ]
+        },
+        "actions": {
+          "Return_Cached_Result": {
+            "type": "Response",
+            "inputs": {
+              "statusCode": 200,
+              "headers": {
+                "Content-Type":        "application/json",
+                "X-Correlation-ID":    "@variables('correlationId')",
+                "X-Idempotent-Result": "true"
+              },
+              "body": "@body('Idempotency_Check')"
+            }
+          },
+          "Terminate_Idempotent": {
+            "type": "Terminate",
+            "runAfter": { "Return_Cached_Result": ["Succeeded"] },
+            "inputs": { "runStatus": "Succeeded" }
+          }
+        },
+        "else": { "actions": {} }
+      },
+
+      "Validate_Input_Schema": {
+        "type": "ParseJson",
+        "runAfter": { "IF_Already_Processed": ["Succeeded"] },
+        "inputs": {
+          "content": "@triggerBody()",
+          "schema": {
+            "type": "object",
+            "required": ["correlationId","documentType","documentContent","brokerCode","productLine"],
+            "properties": {
+              "correlationId":   { "type": "string" },
+              "documentType":    { "type": "string" },
+              "documentContent": { "type": "string" },
+              "brokerCode":      { "type": "string" },
+              "productLine":     { "type": "string" },
+              "attemptNumber":   { "type": "integer" }
+            }
+          }
+        }
+      },
+
+      "Scope_1_Document_Ingestion": {
+        "type": "Scope",
+        "runAfter": { "Validate_Input_Schema": ["Succeeded"] },
+        "actions": {
+
+          "Call_wf_document_ingestion": {
+            "type": "Workflow",
+            "inputs": {
+              "body": "@triggerBody()",
+              "headers": {
+                "Content-Type":     "application/json",
+                "X-Correlation-ID": "@variables('correlationId')"
+              },
+              "host": {
+                "triggerName": "manual",
+                "workflow": {
+                  "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-document-ingestion')}"
+                }
+              },
+              "method": "POST",
+              "retryPolicy": {
+                "type": "exponential",
+                "count": 3,
+                "interval": "PT30S",
+                "minimumInterval": "PT30S",
+                "maximumInterval": "PT5M"
+              }
+            },
+            "limit": { "timeout": "PT15M" }
+          },
+
+          "Validate_Ingestion_Response": {
+            "type": "ParseJson",
+            "runAfter": { "Call_wf_document_ingestion": ["Succeeded"] },
+            "inputs": {
+              "content": "@body('Call_wf_document_ingestion')",
+              "schema": {
+                "type": "object",
+                "required": ["jobId","correlationId","status","overallConfidenceScore","extractedFields"],
+                "properties": {
+                  "jobId":                  { "type": "string" },
+                  "status":                 { "type": "string" },
+                  "overallConfidenceScore": { "type": "number" },
+                  "extractedFields":        { "type": "object" },
+                  "lowConfidenceFields":    { "type": "array" },
+                  "requiresManualReview":   { "type": "boolean" }
+                }
+              }
+            }
+          },
+
+          "Check_Ingestion_Status": {
+            "type": "If",
+            "runAfter": { "Validate_Ingestion_Response": ["Succeeded"] },
+            "expression": {
+              "equals": ["@body('Call_wf_document_ingestion')?['status']", "FAILED"]
+            },
+            "actions": {
+              "Terminate_On_Ingestion_Failure": {
+                "type": "Terminate",
+                "inputs": {
+                  "runStatus":  "Failed",
+                  "runError":   { "code": "DOC_INGESTION_FAILURE", "message": "Document ingestion workflow returned FAILED status" }
+                }
+              }
+            },
+            "else": { "actions": {} }
+          },
+
+          "Set_Processing_Mode": {
+            "type": "Switch",
+            "runAfter": { "Check_Ingestion_Status": ["Succeeded"] },
+            "expression": "@triggerBody()?['documentType']",
+            "cases": {
+              "PDF": {
+                "case": "PDF",
+                "actions": {
+                  "Set_Mode_Structured": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "processingMode", "value": "structured" }
+                  }
+                }
+              },
+              "XLSX": {
+                "case": "XLSX",
+                "actions": {
+                  "Set_Mode_Tabular_XLSX": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "processingMode", "value": "tabular" }
+                  }
+                }
+              },
+              "CSV": {
+                "case": "CSV",
+                "actions": {
+                  "Set_Mode_Tabular_CSV": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "processingMode", "value": "tabular" }
+                  }
+                }
+              },
+              "MSG": {
+                "case": "MSG",
+                "actions": {
+                  "Set_Mode_Unstructured_MSG": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "processingMode", "value": "unstructured" }
+                  }
+                }
+              }
+            },
+            "default": {
+              "actions": {
+                "Set_Mode_Unstructured_Default": {
+                  "type": "SetVariable",
+                  "inputs": { "name": "processingMode", "value": "unstructured" }
+                }
+              }
+            }
+          },
+
+          "Log_Ingestion_Telemetry": {
+            "type": "Http",
+            "runAfter": { "Set_Processing_Mode": ["Succeeded"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "https://dc.services.visualstudio.com/v2/track",
+              "headers": { "Content-Type": "application/json" },
+              "body": [{
+                "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+                "time":  "@utcNow()",
+                "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+                "tags":  { "ai.operation.id": "@variables('correlationId')", "ai.cloud.role": "policy-submission-orchestrator" },
+                "data": {
+                  "baseType": "EventData",
+                  "baseData": {
+                    "ver": 2,
+                    "name": "DocumentIngestionComplete",
+                    "properties": {
+                      "correlationId":  "@variables('correlationId')",
+                      "documentType":   "@triggerBody()?['documentType']",
+                      "processingMode": "@variables('processingMode')",
+                      "brokerCode":     "@triggerBody()?['brokerCode']"
+                    }
+                  }
+                }
+              }]
+            }
+          }
+        }
+      },
+
+      "Catch_Scope_1_Error": {
+        "type": "Workflow",
+        "runAfter": { "Scope_1_Document_Ingestion": ["Failed", "TimedOut"] },
+        "inputs": {
+          "body": {
+            "errorId":        "@guid()",
+            "correlationId":  "@variables('correlationId')",
+            "sourceWorkflow": "policy-submission-orchestrator",
+            "workflowRunId":  "@workflow()['run']['id']",
+            "errorCode":      "DOC_INGESTION_FAILURE",
+            "errorMessage":   "@{coalesce(result('Scope_1_Document_Ingestion')?[0]?['error']?['message'], 'Document ingestion scope failed')}",
+            "errorDetails":   "@result('Scope_1_Document_Ingestion')?[0]?['error']",
+            "actionName":     "Scope_1_Document_Ingestion",
+            "timestamp":      "@utcNow()",
+            "environmentName":"@parameters('environment_name')",
+            "attemptNumber":  "@triggerBody()?['attemptNumber']",
+            "productLine":    "@triggerBody()?['productLine']"
+          },
+          "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+          "host": {
+            "triggerName": "manual",
+            "workflow": {
+              "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-error-handler')}"
+            }
+          },
+          "method": "POST"
+        }
+      },
+      "Terminate_After_Scope_1_Error": {
+        "type": "Terminate",
+        "runAfter": { "Catch_Scope_1_Error": ["Succeeded", "Failed"] },
+        "inputs": { "runStatus": "Failed", "runError": { "code": "DOC_INGESTION_FAILURE", "message": "Pipeline halted at document ingestion stage" } }
+      },
+
+      "Scope_2_Transcription": {
+        "type": "Scope",
+        "runAfter": { "Scope_1_Document_Ingestion": ["Succeeded"] },
+        "actions": {
+
+          "Transcribe_Parse": {
+            "type": "Http",
+            "inputs": {
+              "method": "POST",
+              "uri": "@{concat(parameters('apim_base_url'), '/api/v1/transcriber/submissions/parse')}",
+              "headers": {
+                "Content-Type":     "application/json",
+                "X-Correlation-ID": "@variables('correlationId')",
+                "X-API-Version":    "2024-01"
+              },
+              "body": {
+                "documentContent": "@triggerBody()?['documentContent']",
+                "documentType":    "@triggerBody()?['documentType']",
+                "brokerCode":      "@triggerBody()?['brokerCode']",
+                "correlationId":   "@variables('correlationId')",
+                "processingMode":  "@variables('processingMode')"
+              },
+              "retryPolicy": { "type": "exponential", "count": 3, "interval": "PT30S", "minimumInterval": "PT30S", "maximumInterval": "PT5M" }
+            },
+            "limit": { "timeout": "PT10M" }
+          },
+
+          "Transcribe_Extract_ACORD": {
+            "type": "Http",
+            "inputs": {
+              "method": "POST",
+              "uri": "@{concat(parameters('apim_base_url'), '/api/v1/transcriber/submissions/extract-acord')}",
+              "headers": {
+                "Content-Type":     "application/json",
+                "X-Correlation-ID": "@variables('correlationId')",
+                "X-API-Version":    "2024-01"
+              },
+              "body": {
+                "documentContent": "@triggerBody()?['documentContent']",
+                "documentType":    "@triggerBody()?['documentType']",
+                "brokerCode":      "@triggerBody()?['brokerCode']",
+                "correlationId":   "@variables('correlationId')"
+              },
+              "retryPolicy": { "type": "exponential", "count": 3, "interval": "PT30S", "minimumInterval": "PT30S", "maximumInterval": "PT5M" }
+            },
+            "limit": { "timeout": "PT10M" }
+          },
+
+          "Merge_Transcription_Results": {
+            "type": "Compose",
+            "runAfter": {
+              "Transcribe_Parse":        ["Succeeded"],
+              "Transcribe_Extract_ACORD":["Succeeded", "Failed"]
+            },
+            "inputs": {
+              "parseResult":       "@body('Transcribe_Parse')",
+              "acordResult":       "@body('Transcribe_Extract_ACORD')",
+              "overallCs":         "@body('Transcribe_Parse')?['overallConfidenceScore']",
+              "lowCsFields":       "@body('Transcribe_Parse')?['lowConfidenceFields']",
+              "requiresReview":    "@body('Transcribe_Parse')?['requiresManualReview']",
+              "extractedFields":   "@body('Transcribe_Parse')?['extractedFields']"
+            }
+          },
+
+          "Determine_Submission_Path": {
+            "type": "If",
+            "runAfter": { "Merge_Transcription_Results": ["Succeeded"] },
+            "expression": {
+              "and": [
+                { "greaterOrEquals": ["@body('Transcribe_Parse')?['overallConfidenceScore']", "@parameters('confidence_score_auto_threshold')"] },
+                { "equals": ["@body('Transcribe_Parse')?['requiresManualReview']", false] }
+              ]
+            },
+            "actions": {
+              "Set_Path_Auto_Approve": {
+                "type": "SetVariable",
+                "inputs": { "name": "submissionPath", "value": "AUTO_APPROVE" }
+              }
+            },
+            "else": {
+              "actions": {
+                "Check_Manual_Review_Threshold": {
+                  "type": "If",
+                  "expression": {
+                    "or": [
+                      { "less": ["@body('Transcribe_Parse')?['overallConfidenceScore']", "@parameters('confidence_score_manual_threshold')"] },
+                      { "equals": ["@body('Transcribe_Parse')?['requiresManualReview']", true] }
+                    ]
+                  },
+                  "actions": {
+                    "Set_Path_Manual_Review": {
+                      "type": "SetVariable",
+                      "inputs": { "name": "submissionPath", "value": "MANUAL_REVIEW" }
+                    }
+                  },
+                  "else": {
+                    "actions": {
+                      "Set_Path_Standard": {
+                        "type": "SetVariable",
+                        "inputs": { "name": "submissionPath", "value": "STANDARD" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+
+          "Persist_Transcription_Result": {
+            "type": "Http",
+            "runAfter": { "Determine_Submission_Path": ["Succeeded"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'), '/transcription')}",
+              "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')", "X-API-Version": "2024-01" },
+              "body": {
+                "correlationId":    "@variables('correlationId')",
+                "submissionPath":   "@variables('submissionPath')",
+                "overallCs":        "@body('Transcribe_Parse')?['overallConfidenceScore']",
+                "extractedFields":  "@body('Transcribe_Parse')?['extractedFields']",
+                "lowCsFields":      "@body('Transcribe_Parse')?['lowConfidenceFields']",
+                "persistedAt":      "@utcNow()"
+              }
+            }
+          },
+
+          "Log_Transcription_Telemetry": {
+            "type": "Http",
+            "runAfter": { "Persist_Transcription_Result": ["Succeeded", "Failed"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "https://dc.services.visualstudio.com/v2/track",
+              "headers": { "Content-Type": "application/json" },
+              "body": [{
+                "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+                "time":  "@utcNow()",
+                "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+                "tags":  { "ai.operation.id": "@variables('correlationId')", "ai.cloud.role": "policy-submission-orchestrator" },
+                "data": {
+                  "baseType": "EventData",
+                  "baseData": {
+                    "ver": 2,
+                    "name": "TranscriptionComplete",
+                    "properties": {
+                      "correlationId":          "@variables('correlationId')",
+                      "submissionPath":         "@variables('submissionPath')",
+                      "overallConfidenceScore": "@{body('Transcribe_Parse')?['overallConfidenceScore']}",
+                      "brokerCode":             "@triggerBody()?['brokerCode']",
+                      "productLine":            "@triggerBody()?['productLine']"
+                    }
+                  }
+                }
+              }]
+            }
+          }
+        }
+      },
+
+      "Catch_Scope_2_Error": {
+        "type": "Workflow",
+        "runAfter": { "Scope_2_Transcription": ["Failed", "TimedOut"] },
+        "inputs": {
+          "body": {
+            "errorId":        "@guid()",
+            "correlationId":  "@variables('correlationId')",
+            "sourceWorkflow": "policy-submission-orchestrator",
+            "workflowRunId":  "@workflow()['run']['id']",
+            "errorCode":      "TRANSCRIPTION_FAILURE",
+            "errorMessage":   "@{coalesce(result('Scope_2_Transcription')?[0]?['error']?['message'], 'Transcription scope failed')}",
+            "errorDetails":   "@result('Scope_2_Transcription')?[0]?['error']",
+            "actionName":     "Scope_2_Transcription",
+            "timestamp":      "@utcNow()",
+            "environmentName":"@parameters('environment_name')",
+            "attemptNumber":  "@triggerBody()?['attemptNumber']",
+            "productLine":    "@triggerBody()?['productLine']"
+          },
+          "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+          "host": {
+            "triggerName": "manual",
+            "workflow": {
+              "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-error-handler')}"
+            }
+          },
+          "method": "POST"
+        }
+      },
+      "Terminate_After_Scope_2_Error": {
+        "type": "Terminate",
+        "runAfter": { "Catch_Scope_2_Error": ["Succeeded", "Failed"] },
+        "inputs": { "runStatus": "Failed", "runError": { "code": "TRANSCRIPTION_FAILURE", "message": "Pipeline halted at transcription stage" } }
+      },
+
+      "Scope_3_Policy_Validation": {
+        "type": "Scope",
+        "runAfter": { "Scope_2_Transcription": ["Succeeded"] },
+        "actions": {
+
+          "Build_Validation_Request": {
+            "type": "Compose",
+            "inputs": {
+              "correlationId":  "@variables('correlationId')",
+              "submissionPath": "@variables('submissionPath')",
+              "processingMode": "@variables('processingMode')",
+              "productLine":    "@triggerBody()?['productLine']",
+              "brokerCode":     "@triggerBody()?['brokerCode']",
+              "extractedFields":"@body('Transcribe_Parse')?['extractedFields']"
+            }
+          },
+
+          "Call_wf_policy_validation": {
+            "type": "Workflow",
+            "runAfter": { "Build_Validation_Request": ["Succeeded"] },
+            "inputs": {
+              "body": "@outputs('Build_Validation_Request')",
+              "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+              "host": {
+                "triggerName": "manual",
+                "workflow": {
+                  "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-policy-validation')}"
+                }
+              },
+              "method": "POST",
+              "retryPolicy": { "type": "exponential", "count": 3, "interval": "PT30S", "minimumInterval": "PT30S", "maximumInterval": "PT5M" }
+            },
+            "limit": { "timeout": "PT10M" }
+          },
+
+          "Validate_Policy_Model_Schema": {
+            "type": "ParseJson",
+            "runAfter": { "Call_wf_policy_validation": ["Succeeded"] },
+            "inputs": {
+              "content": "@body('Call_wf_policy_validation')",
+              "schema": {
+                "type": "object",
+                "required": ["policyReference","correlationId","submissionPath","insuredName","insurerName","productLine"],
+                "properties": {
+                  "policyReference": { "type": "string" },
+                  "correlationId":   { "type": "string" },
+                  "submissionPath":  { "type": "string" },
+                  "insuredName":     { "type": "string" },
+                  "insurerName":     { "type": "string" },
+                  "productLine":     { "type": "string" },
+                  "ofacCheckResult": { "type": "object" },
+                  "riskScore":       { "type": "number" }
+                }
+              }
+            }
+          },
+
+          "Check_OFAC_Result": {
+            "type": "If",
+            "runAfter": { "Validate_Policy_Model_Schema": ["Succeeded"] },
+            "expression": {
+              "equals": ["@body('Call_wf_policy_validation')?['ofacCheckResult']?['status']", "MATCH"]
+            },
+            "actions": {
+              "Send_Compliance_Alert_Email": {
+                "type": "ApiConnection",
+                "inputs": {
+                  "host": { "connection": { "referenceName": "office365" } },
+                  "method": "post",
+                  "path": "/Mail/Send",
+                  "body": {
+                    "To":       "@parameters('compliance_team_email')",
+                    "Subject":  "@{concat('[OFAC MATCH] Submission ', variables('correlationId'), ' — IMMEDIATE ACTION REQUIRED')}",
+                    "Body":     "@{concat('<h2>OFAC Sanctions Match Detected</h2><p>Correlation ID: ', variables('correlationId'), '</p><p>Policy Reference: ', body('Call_wf_policy_validation')?['policyReference'], '</p><p>Insured Name: ', body('Call_wf_policy_validation')?['insuredName'], '</p><p>Match Score: ', string(body('Call_wf_policy_validation')?['ofacCheckResult']?['matchScore']), '%</p>')}",
+                    "Importance":"High"
+                  }
+                }
+              },
+              "Update_Status_OFAC_Hold": {
+                "type": "Http",
+                "runAfter": { "Send_Compliance_Alert_Email": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "method": "PATCH",
+                  "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'))}",
+                  "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+                  "body": { "status": "OFAC_HOLD", "updatedAt": "@utcNow()" }
+                }
+              },
+              "Return_OFAC_Hold_Response": {
+                "type": "Response",
+                "runAfter": { "Update_Status_OFAC_Hold": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "statusCode": 200,
+                  "body": { "correlationId": "@variables('correlationId')", "status": "OFAC_HOLD", "message": "Submission placed on OFAC sanctions hold. Compliance team notified." }
+                }
+              },
+              "Terminate_OFAC_Hold": {
+                "type": "Terminate",
+                "runAfter": { "Return_OFAC_Hold_Response": ["Succeeded"] },
+                "inputs": { "runStatus": "Succeeded" }
+              }
+            },
+            "else": { "actions": {} }
+          },
+
+          "IF_Manual_Review_Required": {
+            "type": "If",
+            "runAfter": { "Check_OFAC_Result": ["Succeeded"] },
+            "expression": {
+              "equals": ["@variables('submissionPath')", "MANUAL_REVIEW"]
+            },
+            "actions": {
+              "Send_Underwriter_Review_Email": {
+                "type": "ApiConnection",
+                "inputs": {
+                  "host": { "connection": { "referenceName": "office365" } },
+                  "method": "post",
+                  "path": "/Mail/Send",
+                  "body": {
+                    "To":      "@parameters('underwriting_team_email')",
+                    "Subject": "@{concat('[MANUAL REVIEW REQUIRED] Submission ', variables('correlationId'))}",
+                    "Body":    "@{concat('<h2>Manual Underwriter Review Required</h2><p><strong>Correlation ID:</strong> ', variables('correlationId'), '</p><p><strong>Broker:</strong> ', triggerBody()?['brokerCode'], '</p><p><strong>Product Line:</strong> ', triggerBody()?['productLine'], '</p><p><strong>Insured:</strong> ', body('Call_wf_policy_validation')?['insuredName'], '</p><p><strong>Overall Confidence Score:</strong> ', string(body('Transcribe_Parse')?['overallConfidenceScore']), '%</p><p><strong>Low Confidence Fields:</strong> ', string(body('Transcribe_Parse')?['lowConfidenceFields']), '</p><p>Please review and approve or decline this submission via the Underwriting Portal.</p>')}",
+                    "Importance":"Normal"
+                  }
+                }
+              },
+              "Update_Status_Pending_Review": {
+                "type": "Http",
+                "runAfter": { "Send_Underwriter_Review_Email": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "method": "PATCH",
+                  "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'))}",
+                  "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+                  "body": { "status": "PENDING_REVIEW", "manualReviewRequestedAt": "@utcNow()" }
+                }
+              },
+              "Return_Pending_Review_Response": {
+                "type": "Response",
+                "runAfter": { "Update_Status_Pending_Review": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "statusCode": 202,
+                  "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+                  "body": { "correlationId": "@variables('correlationId')", "status": "PENDING_REVIEW", "message": "Submission requires manual underwriter review. Underwriting team notified." }
+                }
+              },
+              "Terminate_Pending_Review": {
+                "type": "Terminate",
+                "runAfter": { "Return_Pending_Review_Response": ["Succeeded"] },
+                "inputs": { "runStatus": "Succeeded" }
+              }
+            },
+            "else": { "actions": {} }
+          },
+
+          "Log_Validation_Telemetry": {
+            "type": "Http",
+            "runAfter": { "IF_Manual_Review_Required": ["Succeeded"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "https://dc.services.visualstudio.com/v2/track",
+              "headers": { "Content-Type": "application/json" },
+              "body": [{
+                "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+                "time":  "@utcNow()",
+                "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+                "tags":  { "ai.operation.id": "@variables('correlationId')", "ai.cloud.role": "policy-submission-orchestrator" },
+                "data": {
+                  "baseType": "EventData",
+                  "baseData": {
+                    "ver": 2,
+                    "name": "PolicyValidationComplete",
+                    "properties": {
+                      "correlationId":  "@variables('correlationId')",
+                      "submissionPath": "@variables('submissionPath')",
+                      "riskScore":      "@{body('Call_wf_policy_validation')?['riskScore']}",
+                      "ofacStatus":     "@body('Call_wf_policy_validation')?['ofacCheckResult']?['status']"
+                    }
+                  }
+                }
+              }]
+            }
+          }
+        }
+      },
+
+      "Catch_Scope_3_Error": {
+        "type": "Workflow",
+        "runAfter": { "Scope_3_Policy_Validation": ["Failed", "TimedOut"] },
+        "inputs": {
+          "body": {
+            "errorId": "@guid()", "correlationId": "@variables('correlationId')",
+            "sourceWorkflow": "policy-submission-orchestrator", "workflowRunId": "@workflow()['run']['id']",
+            "errorCode": "POLICY_VALIDATION_FAILURE",
+            "errorMessage": "@{coalesce(result('Scope_3_Policy_Validation')?[0]?['error']?['message'], 'Policy validation scope failed')}",
+            "errorDetails": "@result('Scope_3_Policy_Validation')?[0]?['error']",
+            "actionName": "Scope_3_Policy_Validation", "timestamp": "@utcNow()",
+            "environmentName": "@parameters('environment_name')", "attemptNumber": "@triggerBody()?['attemptNumber']",
+            "productLine": "@triggerBody()?['productLine']"
+          },
+          "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+          "host": {
+            "triggerName": "manual",
+            "workflow": {
+              "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-error-handler')}"
+            }
+          },
+          "method": "POST"
+        }
+      },
+      "Terminate_After_Scope_3_Error": {
+        "type": "Terminate",
+        "runAfter": { "Catch_Scope_3_Error": ["Succeeded", "Failed"] },
+        "inputs": { "runStatus": "Failed", "runError": { "code": "POLICY_VALIDATION_FAILURE", "message": "Pipeline halted at policy validation stage" } }
+      },
+
+      "Scope_4_Quote_Processing": {
+        "type": "Scope",
+        "runAfter": { "Scope_3_Policy_Validation": ["Succeeded"] },
+        "actions": {
+
+          "Build_Quote_Request": {
+            "type": "Compose",
+            "inputs": {
+              "correlationId":   "@variables('correlationId')",
+              "policyReference": "@body('Call_wf_policy_validation')?['policyReference']",
+              "productLine":     "@triggerBody()?['productLine']",
+              "coverageLines":   "@body('Call_wf_policy_validation')?['coverageLines']",
+              "totalSumInsured": "@body('Call_wf_policy_validation')?['totalSumInsured']",
+              "estimatedPremium":"@body('Call_wf_policy_validation')?['estimatedPremium']",
+              "currency":        "@body('Call_wf_policy_validation')?['currency']",
+              "riskScore":       "@body('Call_wf_policy_validation')?['riskScore']",
+              "inceptionDate":   "@body('Call_wf_policy_validation')?['inceptionDate']",
+              "expiryDate":      "@body('Call_wf_policy_validation')?['expiryDate']"
+            }
+          },
+
+          "Call_wf_quote_processing": {
+            "type": "Workflow",
+            "runAfter": { "Build_Quote_Request": ["Succeeded"] },
+            "inputs": {
+              "body": "@outputs('Build_Quote_Request')",
+              "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+              "host": {
+                "triggerName": "manual",
+                "workflow": {
+                  "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-quote-processing')}"
+                }
+              },
+              "method": "POST",
+              "retryPolicy": { "type": "exponential", "count": 3, "interval": "PT30S", "minimumInterval": "PT30S", "maximumInterval": "PT5M" }
+            },
+            "limit": { "timeout": "PT10M" }
+          },
+
+          "Validate_Quote_Schema": {
+            "type": "ParseJson",
+            "runAfter": { "Call_wf_quote_processing": ["Succeeded"] },
+            "inputs": {
+              "content": "@body('Call_wf_quote_processing')",
+              "schema": {
+                "type": "object",
+                "required": ["quoteId","correlationId","policyReference","quoteStatus","grossPremium","currency"],
+                "properties": {
+                  "quoteId":         { "type": "string" },
+                  "correlationId":   { "type": "string" },
+                  "policyReference": { "type": "string" },
+                  "quoteStatus":     { "type": "string" },
+                  "grossPremium":    { "type": "number" },
+                  "currency":        { "type": "string" }
+                }
+              }
+            }
+          },
+
+          "Set_Quote_Id": {
+            "type": "SetVariable",
+            "runAfter": { "Validate_Quote_Schema": ["Succeeded"] },
+            "inputs": { "name": "finalQuoteId", "value": "@body('Call_wf_quote_processing')?['quoteId']" }
+          },
+
+          "IF_Quote_Declined": {
+            "type": "If",
+            "runAfter": { "Set_Quote_Id": ["Succeeded"] },
+            "expression": { "equals": ["@body('Call_wf_quote_processing')?['quoteStatus']", "DECLINED"] },
+            "actions": {
+              "Patch_Policy_Declined": {
+                "type": "Http",
+                "inputs": {
+                  "method": "PATCH",
+                  "uri": "@{concat(parameters('apim_base_url'), '/api/v1/policies?reference=', encodeURIComponent(body('Call_wf_policy_validation')?['policyReference']))}",
+                  "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+                  "body": { "status": "DECLINED", "declineReason": "@body('Call_wf_quote_processing')?['declineReason']", "updatedAt": "@utcNow()" }
+                }
+              },
+              "Send_Decline_Email": {
+                "type": "ApiConnection",
+                "runAfter": { "Patch_Policy_Declined": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "host": { "connection": { "referenceName": "office365" } },
+                  "method": "post",
+                  "path": "/Mail/Send",
+                  "body": {
+                    "To":      "@triggerBody()?['submitterEmail']",
+                    "Subject": "@{concat('[QUOTE DECLINED] Submission ', triggerBody()?['brokerCode'], ' — ', triggerBody()?['productLine'])}",
+                    "Body":    "@{concat('<p>Dear Broker,</p><p>We regret to inform you that your submission has been declined.</p><p><strong>Reason:</strong> ', body('Call_wf_quote_processing')?['declineReason'], '</p><p><strong>Correlation ID:</strong> ', variables('correlationId'), '</p>')}",
+                    "Importance":"Normal"
+                  }
+                }
+              },
+              "Return_Declined_Response": {
+                "type": "Response",
+                "runAfter": { "Send_Decline_Email": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "statusCode": 200,
+                  "body": { "correlationId": "@variables('correlationId')", "status": "DECLINED", "quoteStatus": "DECLINED", "declineReason": "@body('Call_wf_quote_processing')?['declineReason']" }
+                }
+              },
+              "Terminate_Quote_Declined": {
+                "type": "Terminate",
+                "runAfter": { "Return_Declined_Response": ["Succeeded"] },
+                "inputs": { "runStatus": "Succeeded" }
+              }
+            },
+            "else": { "actions": {} }
+          },
+
+          "IF_Quote_Referred": {
+            "type": "If",
+            "runAfter": { "IF_Quote_Declined": ["Succeeded"] },
+            "expression": { "equals": ["@body('Call_wf_quote_processing')?['quoteStatus']", "REFERRED"] },
+            "actions": {
+              "Send_Referral_Email": {
+                "type": "ApiConnection",
+                "inputs": {
+                  "host": { "connection": { "referenceName": "office365" } },
+                  "method": "post",
+                  "path": "/Mail/Send",
+                  "body": {
+                    "To":      "@parameters('underwriting_team_email')",
+                    "Subject": "@{concat('[REFERRED] Quote requires senior underwriter — ', variables('correlationId'))}",
+                    "Body":    "@{concat('<p>A quote has been referred for senior underwriter review.</p><p><strong>Correlation ID:</strong> ', variables('correlationId'), '</p><p><strong>Risk Score:</strong> ', string(body('Call_wf_policy_validation')?['riskScore']), '</p><p><strong>Reason:</strong> ', body('Call_wf_quote_processing')?['referralReason'], '</p>')}",
+                    "Importance":"High"
+                  }
+                }
+              },
+              "Update_Status_Referred": {
+                "type": "Http",
+                "runAfter": { "Send_Referral_Email": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "method": "PATCH",
+                  "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'))}",
+                  "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+                  "body": { "status": "REFERRED", "updatedAt": "@utcNow()" }
+                }
+              },
+              "Return_Referred_Response": {
+                "type": "Response",
+                "runAfter": { "Update_Status_Referred": ["Succeeded", "Failed"] },
+                "inputs": {
+                  "statusCode": 202,
+                  "body": { "correlationId": "@variables('correlationId')", "status": "REFERRED", "message": "Quote referred to senior underwriter for approval" }
+                }
+              },
+              "Terminate_Referred": {
+                "type": "Terminate",
+                "runAfter": { "Return_Referred_Response": ["Succeeded"] },
+                "inputs": { "runStatus": "Succeeded" }
+              }
+            },
+            "else": { "actions": {} }
+          },
+
+          "Store_Quote_Result": {
+            "type": "Http",
+            "runAfter": { "IF_Quote_Referred": ["Succeeded"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'), '/quote')}",
+              "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+              "body": "@body('Call_wf_quote_processing')"
+            }
+          },
+
+          "Log_Quote_Telemetry": {
+            "type": "Http",
+            "runAfter": { "Store_Quote_Result": ["Succeeded", "Failed"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "https://dc.services.visualstudio.com/v2/track",
+              "headers": { "Content-Type": "application/json" },
+              "body": [{
+                "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+                "time":  "@utcNow()",
+                "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+                "tags":  { "ai.operation.id": "@variables('correlationId')", "ai.cloud.role": "policy-submission-orchestrator" },
+                "data": {
+                  "baseType": "EventData",
+                  "baseData": {
+                    "ver": 2,
+                    "name": "QuoteProcessingComplete",
+                    "properties": {
+                      "correlationId": "@variables('correlationId')",
+                      "quoteStatus":   "@body('Call_wf_quote_processing')?['quoteStatus']",
+                      "marketType":    "@body('Call_wf_quote_processing')?['marketType']"
+                    },
+                    "measurements": {
+                      "grossPremium": "@body('Call_wf_quote_processing')?['grossPremium']",
+                      "riskScore":    "@body('Call_wf_policy_validation')?['riskScore']"
+                    }
+                  }
+                }
+              }]
+            }
+          }
+        }
+      },
+
+      "Catch_Scope_4_Error": {
+        "type": "Workflow",
+        "runAfter": { "Scope_4_Quote_Processing": ["Failed", "TimedOut"] },
+        "inputs": {
+          "body": {
+            "errorId": "@guid()", "correlationId": "@variables('correlationId')",
+            "sourceWorkflow": "policy-submission-orchestrator", "workflowRunId": "@workflow()['run']['id']",
+            "errorCode": "QUOTE_PROCESSING_FAILURE",
+            "errorMessage": "@{coalesce(result('Scope_4_Quote_Processing')?[0]?['error']?['message'], 'Quote processing scope failed')}",
+            "errorDetails": "@result('Scope_4_Quote_Processing')?[0]?['error']",
+            "actionName": "Scope_4_Quote_Processing", "timestamp": "@utcNow()",
+            "environmentName": "@parameters('environment_name')", "attemptNumber": "@triggerBody()?['attemptNumber']",
+            "productLine": "@triggerBody()?['productLine']"
+          },
+          "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+          "host": {
+            "triggerName": "manual",
+            "workflow": {
+              "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-error-handler')}"
+            }
+          },
+          "method": "POST"
+        }
+      },
+      "Terminate_After_Scope_4_Error": {
+        "type": "Terminate",
+        "runAfter": { "Catch_Scope_4_Error": ["Succeeded", "Failed"] },
+        "inputs": { "runStatus": "Failed", "runError": { "code": "QUOTE_PROCESSING_FAILURE", "message": "Pipeline halted at quote processing stage" } }
+      },
+
+      "Scope_5_Policy_Management": {
+        "type": "Scope",
+        "runAfter": { "Scope_4_Quote_Processing": ["Succeeded"] },
+        "actions": {
+
+          "Call_wf_policy_management": {
+            "type": "Workflow",
+            "inputs": {
+              "body": {
+                "correlationId": "@variables('correlationId')",
+                "policyModel":   "@body('Call_wf_policy_validation')",
+                "quoteModel":    "@body('Call_wf_quote_processing')"
+              },
+              "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+              "host": {
+                "triggerName": "manual",
+                "workflow": {
+                  "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-policy-management')}"
+                }
+              },
+              "method": "POST",
+              "retryPolicy": { "type": "exponential", "count": 3, "interval": "PT30S", "minimumInterval": "PT30S", "maximumInterval": "PT5M" }
+            },
+            "limit": { "timeout": "PT10M" }
+          },
+
+          "Validate_Management_Response": {
+            "type": "ParseJson",
+            "runAfter": { "Call_wf_policy_management": ["Succeeded"] },
+            "inputs": {
+              "content": "@body('Call_wf_policy_management')",
+              "schema": {
+                "type": "object",
+                "required": ["policyId","policyReference","correlationId","operationType","status"],
+                "properties": {
+                  "policyId":        { "type": "string" },
+                  "policyReference": { "type": "string" },
+                  "operationType":   { "type": "string" },
+                  "status":          { "type": "string" }
+                }
+              }
+            }
+          },
+
+          "Set_Final_Policy_Id": {
+            "type": "SetVariable",
+            "runAfter": { "Validate_Management_Response": ["Succeeded"] },
+            "inputs": { "name": "finalPolicyId", "value": "@body('Call_wf_policy_management')?['policyId']" }
+          },
+
+          "IF_Binding_Failed": {
+            "type": "If",
+            "runAfter": { "Set_Final_Policy_Id": ["Succeeded"] },
+            "expression": {
+              "not": { "equals": ["@body('Call_wf_policy_management')?['operationType']", "BOUND"] }
+            },
+            "actions": {
+              "Terminate_Not_Bound": {
+                "type": "Terminate",
+                "inputs": { "runStatus": "Failed", "runError": { "code": "POLICY_BINDING_FAILURE", "message": "Policy management returned unexpected operation type — expected BOUND" } }
+              }
+            },
+            "else": { "actions": {} }
+          },
+
+          "Send_Binding_Confirmation_Email": {
+            "type": "ApiConnection",
+            "runAfter": { "IF_Binding_Failed": ["Succeeded"] },
+            "inputs": {
+              "host": { "connection": { "referenceName": "office365" } },
+              "method": "post",
+              "path": "/Mail/Send",
+              "body": {
+                "To":      "@triggerBody()?['submitterEmail']",
+                "Subject": "@{concat('[POLICY BOUND] ', body('Call_wf_policy_management')?['policyReference'], ' — Binding Confirmation')}",
+                "Body":    "@{concat('<h2>Policy Binding Confirmation</h2><p>Dear Broker,</p><p>We are pleased to confirm that the following policy has been bound.</p><table><tr><td><strong>Policy ID:</strong></td><td>', body('Call_wf_policy_management')?['policyId'], '</td></tr><tr><td><strong>Policy Reference:</strong></td><td>', body('Call_wf_policy_management')?['policyReference'], '</td></tr><tr><td><strong>Bound At:</strong></td><td>', body('Call_wf_policy_management')?['boundAt'], '</td></tr><tr><td><strong>Annual Premium:</strong></td><td>', string(body('Call_wf_policy_management')?['annualPremium']), '</td></tr></table><p><a href=\"', body('Call_wf_policy_management')?['policyScheduleUrl'], '\">Download Policy Schedule</a></p>')}",
+                "Importance":"Normal"
+              }
+            }
+          },
+
+          "Publish_PolicyBound_Event": {
+            "type": "ServiceProvider",
+            "runAfter": { "Send_Binding_Confirmation_Email": ["Succeeded", "Failed"] },
+            "inputs": {
+              "parameters": {
+                "entityName": "automation-events",
+                "message": {
+                  "contentData": "@{base64(string(createObject('eventType', 'policy.bound', 'policyId', body('Call_wf_policy_management')?['policyId'], 'policyReference', body('Call_wf_policy_management')?['policyReference'], 'correlationId', variables('correlationId'), 'productLine', triggerBody()?['productLine'], 'brokerCode', triggerBody()?['brokerCode'], 'timestamp', utcNow())))}",
+                  "contentType":    "application/json",
+                  "messageId":      "@variables('correlationId')",
+                  "userProperties": {
+                    "eventType":   "policy.bound",
+                    "productLine": "@triggerBody()?['productLine']",
+                    "environment": "@parameters('environment_name')"
+                  }
+                }
+              },
+              "serviceProviderConfiguration": {
+                "connectionName":    "serviceBus",
+                "operationId":       "sendMessage",
+                "serviceProviderId": "/serviceProviders/serviceBus"
+              }
+            }
+          },
+
+          "Log_Binding_Telemetry": {
+            "type": "Http",
+            "runAfter": { "Publish_PolicyBound_Event": ["Succeeded", "Failed"] },
+            "inputs": {
+              "method": "POST",
+              "uri": "https://dc.services.visualstudio.com/v2/track",
+              "headers": { "Content-Type": "application/json" },
+              "body": [{
+                "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+                "time":  "@utcNow()",
+                "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+                "tags":  { "ai.operation.id": "@variables('correlationId')", "ai.cloud.role": "policy-submission-orchestrator" },
+                "data": {
+                  "baseType": "EventData",
+                  "baseData": {
+                    "ver": 2,
+                    "name": "PolicyBound",
+                    "properties": {
+                      "correlationId":   "@variables('correlationId')",
+                      "policyId":        "@body('Call_wf_policy_management')?['policyId']",
+                      "policyReference": "@body('Call_wf_policy_management')?['policyReference']",
+                      "productLine":     "@triggerBody()?['productLine']",
+                      "brokerCode":      "@triggerBody()?['brokerCode']"
+                    },
+                    "measurements": { "annualPremium": "@body('Call_wf_policy_management')?['annualPremium']" }
+                  }
+                }
+              }]
+            }
+          }
+        }
+      },
+
+      "Catch_Scope_5_Error": {
+        "type": "Workflow",
+        "runAfter": { "Scope_5_Policy_Management": ["Failed", "TimedOut"] },
+        "inputs": {
+          "body": {
+            "errorId": "@guid()", "correlationId": "@variables('correlationId')",
+            "sourceWorkflow": "policy-submission-orchestrator", "workflowRunId": "@workflow()['run']['id']",
+            "errorCode": "POLICY_BINDING_FAILURE",
+            "errorMessage": "@{coalesce(result('Scope_5_Policy_Management')?[0]?['error']?['message'], 'Policy management/binding scope failed')}",
+            "errorDetails": "@result('Scope_5_Policy_Management')?[0]?['error']",
+            "actionName": "Scope_5_Policy_Management", "timestamp": "@utcNow()",
+            "environmentName": "@parameters('environment_name')", "attemptNumber": "@triggerBody()?['attemptNumber']",
+            "productLine": "@triggerBody()?['productLine']"
+          },
+          "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')" },
+          "host": {
+            "triggerName": "manual",
+            "workflow": {
+              "id": "@{concat(split(workflow()['id'], '/workflows/')[0], '/workflows/wf-error-handler')}"
+            }
+          },
+          "method": "POST"
+        }
+      },
+      "Terminate_After_Scope_5_Error": {
+        "type": "Terminate",
+        "runAfter": { "Catch_Scope_5_Error": ["Succeeded", "Failed"] },
+        "inputs": { "runStatus": "Failed", "runError": { "code": "POLICY_BINDING_FAILURE", "message": "Pipeline halted at policy binding stage" } }
+      },
+
+      "Calculate_Processing_Duration": {
+        "type": "Compose",
+        "runAfter": { "Scope_5_Policy_Management": ["Succeeded"] },
+        "inputs": "@div(sub(ticks(utcNow()), ticks(variables('processingStartTime'))), 10000)"
+      },
+
+      "Update_Submission_Final_Status": {
+        "type": "Http",
+        "runAfter": { "Calculate_Processing_Duration": ["Succeeded"] },
+        "inputs": {
+          "method": "PATCH",
+          "uri": "@{concat(parameters('apim_base_url'), '/api/v1/submissions/', variables('correlationId'))}",
+          "headers": { "Content-Type": "application/json", "X-Correlation-ID": "@variables('correlationId')", "X-API-Version": "2024-01" },
+          "body": {
+            "status":        "COMPLETED",
+            "completedAt":   "@utcNow()",
+            "durationMs":    "@outputs('Calculate_Processing_Duration')",
+            "policyId":      "@variables('finalPolicyId')",
+            "quoteId":       "@variables('finalQuoteId')",
+            "submissionPath":"@variables('submissionPath')"
+          }
+        }
+      },
+
+      "Log_Completion_Telemetry": {
+        "type": "Http",
+        "runAfter": { "Update_Submission_Final_Status": ["Succeeded", "Failed"] },
+        "inputs": {
+          "method": "POST",
+          "uri": "https://dc.services.visualstudio.com/v2/track",
+          "headers": { "Content-Type": "application/json" },
+          "body": [{
+            "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+            "time":  "@utcNow()",
+            "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+            "tags":  { "ai.operation.id": "@variables('correlationId')", "ai.cloud.role": "policy-submission-orchestrator" },
+            "data": {
+              "baseType": "EventData",
+              "baseData": {
+                "ver": 2,
+                "name": "SubmissionCompleted",
+                "properties": {
+                  "correlationId":  "@variables('correlationId')",
+                  "submissionPath": "@variables('submissionPath')",
+                  "documentType":   "@triggerBody()?['documentType']",
+                  "productLine":    "@triggerBody()?['productLine']",
+                  "brokerCode":     "@triggerBody()?['brokerCode']",
+                  "policyId":       "@variables('finalPolicyId')",
+                  "quoteId":        "@variables('finalQuoteId')",
+                  "currency":       "@body('Call_wf_quote_processing')?['currency']",
+                  "sourceSystem":   "@triggerBody()?['sourceSystem']"
+                },
+                "measurements": {
+                  "durationMs":    "@outputs('Calculate_Processing_Duration')",
+                  "grossPremium":  "@body('Call_wf_quote_processing')?['grossPremium']",
+                  "attemptNumber": "@triggerBody()?['attemptNumber']"
+                }
+              }
+            }
+          }]
+        }
+      },
+
+      "Response_Success": {
+        "type": "Response",
+        "runAfter": { "Log_Completion_Telemetry": ["Succeeded", "Failed"] },
+        "inputs": {
+          "statusCode": 200,
+          "headers": {
+            "Content-Type":     "application/json",
+            "X-Correlation-ID": "@variables('correlationId')"
+          },
+          "body": {
+            "correlationId":       "@variables('correlationId')",
+            "status":              "COMPLETED",
+            "policyId":            "@variables('finalPolicyId')",
+            "policyReference":     "@body('Call_wf_policy_management')?['policyReference']",
+            "quoteId":             "@variables('finalQuoteId')",
+            "grossPremium":        "@body('Call_wf_quote_processing')?['grossPremium']",
+            "currency":            "@body('Call_wf_quote_processing')?['currency']",
+            "boundAt":             "@body('Call_wf_policy_management')?['boundAt']",
+            "policyScheduleUrl":   "@body('Call_wf_policy_management')?['policyScheduleUrl']",
+            "submissionPath":      "@variables('submissionPath')",
+            "processingDurationMs":"@outputs('Calculate_Processing_Duration')"
+          }
+        }
+      }
+
+    },
+    "outputs": {}
+  },
+  "kind": "Stateful"
+}

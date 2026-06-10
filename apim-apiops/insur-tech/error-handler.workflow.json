@@ -1,0 +1,630 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "apim_base_url":                  { "type": "String" },
+      "enable_db_error_logging":        { "type": "Bool",   "defaultValue": true },
+      "enable_servicebus_error_routing":{ "type": "Bool",   "defaultValue": true },
+      "enable_pagerduty":               { "type": "Bool",   "defaultValue": false },
+      "pagerduty_severity_threshold":   { "type": "String", "defaultValue": "HIGH" },
+      "environment_name":               { "type": "String" }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "method": "POST",
+          "schema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "required": ["errorId","correlationId","sourceWorkflow","workflowRunId","errorCode","errorMessage","timestamp","environmentName","attemptNumber"],
+            "properties": {
+              "errorId":          { "type": "string" },
+              "correlationId":    { "type": "string" },
+              "sourceWorkflow":   { "type": "string" },
+              "workflowRunId":    { "type": "string" },
+              "errorCode":        { "type": "string" },
+              "errorMessage":     { "type": "string" },
+              "timestamp":        { "type": "string" },
+              "environmentName":  { "type": "string" },
+              "attemptNumber":    { "type": "integer" },
+              "actionName":       { "type": "string" },
+              "errorDetails":     { "type": "object" },
+              "requestPayload":   { "type": "object" },
+              "responsePayload":  { "type": "object" },
+              "httpStatusCode":   { "type": "integer" },
+              "innerException":   { "type": "string" },
+              "productLine":      { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "Validate_Error_Input": {
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@triggerBody()",
+          "schema": {
+            "type": "object",
+            "required": ["errorId","correlationId","sourceWorkflow","errorCode","errorMessage"],
+            "properties": {
+              "errorId":         { "type": "string" },
+              "correlationId":   { "type": "string" },
+              "sourceWorkflow":  { "type": "string" },
+              "errorCode":       { "type": "string" },
+              "errorMessage":    { "type": "string" },
+              "httpStatusCode":  { "type": "integer" },
+              "productLine":     { "type": "string" }
+            }
+          }
+        }
+      },
+      "Initialize_Severity": {
+        "type": "InitializeVariable",
+        "runAfter": { "Validate_Error_Input": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "severity", "type": "string", "value": "LOW" }]
+        }
+      },
+      "Initialize_BusinessCriticality": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_Severity": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "businessCriticality", "type": "string", "value": "MEDIUM" }]
+        }
+      },
+      "Initialize_DataClassification": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_BusinessCriticality": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "dataClassification", "type": "string", "value": "INTERNAL" }]
+        }
+      },
+      "Initialize_IncidentCategory": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_DataClassification": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "incidentCategory", "type": "string", "value": "INTEGRATION_FAILURE" }]
+        }
+      },
+      "Initialize_DbStatus": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_IncidentCategory": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "dbStatus", "type": "string", "value": "SKIPPED" }]
+        }
+      },
+      "Initialize_SbStatus": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_DbStatus": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "sbStatus", "type": "string", "value": "SKIPPED" }]
+        }
+      },
+      "Initialize_PdStatus": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_SbStatus": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "pdStatus", "type": "string", "value": "SKIPPED" }]
+        }
+      },
+      "Initialize_AiStatus": {
+        "type": "InitializeVariable",
+        "runAfter": { "Initialize_PdStatus": ["Succeeded"] },
+        "inputs": {
+          "variables": [{ "name": "aiStatus", "type": "string", "value": "SUCCESS" }]
+        }
+      },
+      "Determine_Severity": {
+        "type": "If",
+        "runAfter": { "Initialize_AiStatus": ["Succeeded"] },
+        "expression": {
+          "or": [
+            { "contains": ["@triggerBody()?['errorCode']", "BINDING_FAILURE"] },
+            { "contains": ["@triggerBody()?['errorCode']", "TRANSCRIPTION_FAILURE"] },
+            { "equals": ["@triggerBody()?['httpStatusCode']", 500] }
+          ]
+        },
+        "actions": {
+          "Set_Severity_Critical": {
+            "type": "SetVariable",
+            "inputs": { "name": "severity", "value": "CRITICAL" }
+          }
+        },
+        "else": {
+          "actions": {
+            "Check_High_Severity": {
+              "type": "If",
+              "expression": {
+                "or": [
+                  { "contains": ["@triggerBody()?['errorCode']", "VALIDATION_FAILURE"] },
+                  { "contains": ["@triggerBody()?['errorCode']", "INGESTION_FAILURE"] },
+                  { "contains": ["@triggerBody()?['errorCode']", "MANAGEMENT_FAILURE"] }
+                ]
+              },
+              "actions": {
+                "Set_Severity_High": {
+                  "type": "SetVariable",
+                  "inputs": { "name": "severity", "value": "HIGH" }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Check_Medium_Severity": {
+                    "type": "If",
+                    "expression": {
+                      "or": [
+                        { "equals": ["@triggerBody()?['httpStatusCode']", 400] },
+                        { "equals": ["@triggerBody()?['httpStatusCode']", 422] }
+                      ]
+                    },
+                    "actions": {
+                      "Set_Severity_Medium": {
+                        "type": "SetVariable",
+                        "inputs": { "name": "severity", "value": "MEDIUM" }
+                      }
+                    },
+                    "else": { "actions": {} }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Determine_Business_Criticality": {
+        "type": "If",
+        "runAfter": { "Determine_Severity": ["Succeeded"] },
+        "expression": {
+          "or": [
+            { "equals": ["@variables('severity')", "CRITICAL"] },
+            { "equals": ["@triggerBody()?['productLine']", "AVIATION"] },
+            { "equals": ["@triggerBody()?['productLine']", "MARINE"] }
+          ]
+        },
+        "actions": {
+          "Set_Criticality_High": {
+            "type": "SetVariable",
+            "inputs": { "name": "businessCriticality", "value": "HIGH" }
+          }
+        },
+        "else": {
+          "actions": {
+            "Set_Criticality_Medium": {
+              "type": "SetVariable",
+              "inputs": { "name": "businessCriticality", "value": "MEDIUM" }
+            }
+          }
+        }
+      },
+      "Determine_Data_Classification": {
+        "type": "If",
+        "runAfter": { "Determine_Business_Criticality": ["Succeeded"] },
+        "expression": {
+          "or": [
+            { "contains": ["@{triggerBody()?['requestPayload']}", "insured_name"] },
+            { "contains": ["@{triggerBody()?['requestPayload']}", "insuredName"] },
+            { "contains": ["@{triggerBody()?['requestPayload']}", "insured_address"] }
+          ]
+        },
+        "actions": {
+          "Set_Classification_Confidential": {
+            "type": "SetVariable",
+            "inputs": { "name": "dataClassification", "value": "CONFIDENTIAL" }
+          }
+        },
+        "else": { "actions": {} }
+      },
+      "Determine_Incident_Category": {
+        "type": "Switch",
+        "runAfter": { "Determine_Data_Classification": ["Succeeded"] },
+        "expression": "@triggerBody()?['errorCode']",
+        "cases": {
+          "Validation_Error": {
+            "case": "POLICY_VALIDATION_FAILURE",
+            "actions": {
+              "Set_Category_Validation": {
+                "type": "SetVariable",
+                "inputs": { "name": "incidentCategory", "value": "VALIDATION_ERROR" }
+              }
+            }
+          },
+          "Auth_Failure": {
+            "case": "AUTH_FAILURE",
+            "actions": {
+              "Set_Category_Auth": {
+                "type": "SetVariable",
+                "inputs": { "name": "incidentCategory", "value": "AUTH_FAILURE" }
+              }
+            }
+          },
+          "Capacity_Exceeded": {
+            "case": "CAPACITY_EXCEEDED",
+            "actions": {
+              "Set_Category_Capacity": {
+                "type": "SetVariable",
+                "inputs": { "name": "incidentCategory", "value": "CAPACITY_EXCEEDED" }
+              }
+            }
+          }
+        },
+        "default": {
+          "actions": {
+            "Set_Category_Integration": {
+              "type": "SetVariable",
+              "inputs": { "name": "incidentCategory", "value": "INTEGRATION_FAILURE" }
+            }
+          }
+        }
+      },
+      "Determine_Retry_Eligible": {
+        "type": "Compose",
+        "runAfter": { "Determine_Incident_Category": ["Succeeded"] },
+        "inputs": "@or(contains(triggerBody()?['errorCode'], 'TIMEOUT'), equals(triggerBody()?['httpStatusCode'], 429), equals(triggerBody()?['httpStatusCode'], 503), equals(triggerBody()?['httpStatusCode'], 504))"
+      },
+      "Determine_Regulatory_Impact": {
+        "type": "Compose",
+        "runAfter": { "Determine_Retry_Eligible": ["Succeeded"] },
+        "inputs": "@and(equals(variables('dataClassification'), 'CONFIDENTIAL'), equals(parameters('environment_name'), 'prod'))"
+      },
+      "Determine_SLA_Breach_Risk": {
+        "type": "Compose",
+        "runAfter": { "Determine_Regulatory_Impact": ["Succeeded"] },
+        "inputs": "@or(equals(variables('severity'), 'CRITICAL'), equals(variables('severity'), 'HIGH'))"
+      },
+      "Mask_PII_In_Request_Payload": {
+        "type": "Compose",
+        "runAfter": { "Determine_SLA_Breach_Risk": ["Succeeded"] },
+        "inputs": {
+          "insured_name":    "[REDACTED]",
+          "insured_address": "[REDACTED]",
+          "insuredName":     "[REDACTED]",
+          "address":         "[REDACTED]",
+          "dob":             "[REDACTED]",
+          "dateOfBirth":     "[REDACTED]",
+          "_originalFields": "@triggerBody()?['requestPayload']"
+        }
+      },
+      "Build_Tags": {
+        "type": "Compose",
+        "runAfter": { "Mask_PII_In_Request_Payload": ["Succeeded"] },
+        "inputs": {
+          "environment":   "@parameters('environment_name')",
+          "product":       "spykhertech-policy-platform",
+          "region":        "uksouth",
+          "ownerTeam":     "platform-engineering",
+          "componentName": "@triggerBody()?['sourceWorkflow']"
+        }
+      },
+      "Build_Enriched_Error": {
+        "type": "Compose",
+        "runAfter": { "Build_Tags": ["Succeeded"] },
+        "inputs": {
+          "errorId":             "@triggerBody()?['errorId']",
+          "correlationId":       "@triggerBody()?['correlationId']",
+          "sourceWorkflow":      "@triggerBody()?['sourceWorkflow']",
+          "workflowRunId":       "@triggerBody()?['workflowRunId']",
+          "errorCode":           "@triggerBody()?['errorCode']",
+          "errorMessage":        "@triggerBody()?['errorMessage']",
+          "timestamp":           "@triggerBody()?['timestamp']",
+          "environmentName":     "@triggerBody()?['environmentName']",
+          "attemptNumber":       "@triggerBody()?['attemptNumber']",
+          "actionName":          "@triggerBody()?['actionName']",
+          "errorDetails":        "@triggerBody()?['errorDetails']",
+          "requestPayload":      "@outputs('Mask_PII_In_Request_Payload')",
+          "responsePayload":     { "masked": true, "note": "[PII fields redacted]" },
+          "httpStatusCode":      "@triggerBody()?['httpStatusCode']",
+          "innerException":      "@triggerBody()?['innerException']",
+          "severity":            "@variables('severity')",
+          "businessCriticality": "@variables('businessCriticality')",
+          "dataClassification":  "@variables('dataClassification')",
+          "incidentCategory":    "@variables('incidentCategory')",
+          "impactedSystems":     ["policy-submission-orchestrator", "insurance-policy-saas", "transcriber-saas"],
+          "retryEligible":       "@outputs('Determine_Retry_Eligible')",
+          "escalationPath":      "platform-engineering",
+          "slaBreachRisk":       "@outputs('Determine_SLA_Breach_Risk')",
+          "regulatoryImpact":    "@outputs('Determine_Regulatory_Impact')",
+          "tags":                "@outputs('Build_Tags')",
+          "dbLoggingStatus":     "SKIPPED",
+          "serviceBusStatus":    "SKIPPED",
+          "pagerdutyStatus":     "SKIPPED",
+          "appInsightsStatus":   "SUCCESS",
+          "enrichedAt":          "@utcNow()"
+        }
+      },
+      "IF_DB_Logging_Enabled": {
+        "type": "If",
+        "runAfter": { "Build_Enriched_Error": ["Succeeded"] },
+        "expression": {
+          "equals": ["@parameters('enable_db_error_logging')", true]
+        },
+        "actions": {
+          "Scope_DB_Logging": {
+            "type": "Scope",
+            "actions": {
+              "Log_Error_To_DB": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "@{concat(parameters('apim_base_url'), '/api/v1/errors/log')}",
+                  "headers": {
+                    "Content-Type":       "application/json",
+                    "X-Correlation-ID":   "@triggerBody()?['correlationId']",
+                    "X-API-Version":      "2024-01"
+                  },
+                  "body": "@outputs('Build_Enriched_Error')",
+                  "retryPolicy": {
+                    "type": "exponential",
+                    "count": 2,
+                    "interval": "PT15S",
+                    "minimumInterval": "PT15S",
+                    "maximumInterval": "PT2M"
+                  }
+                }
+              },
+              "Set_DB_Status_Success": {
+                "type": "SetVariable",
+                "runAfter": { "Log_Error_To_DB": ["Succeeded"] },
+                "inputs": { "name": "dbStatus", "value": "SUCCESS" }
+              }
+            }
+          },
+          "Set_DB_Status_Failed": {
+            "type": "SetVariable",
+            "runAfter": { "Scope_DB_Logging": ["Failed", "TimedOut"] },
+            "inputs": { "name": "dbStatus", "value": "FAILED" }
+          }
+        },
+        "else": { "actions": {} }
+      },
+      "IF_ServiceBus_Enabled": {
+        "type": "If",
+        "runAfter": { "IF_DB_Logging_Enabled": ["Succeeded"] },
+        "expression": {
+          "equals": ["@parameters('enable_servicebus_error_routing')", true]
+        },
+        "actions": {
+          "Scope_ServiceBus_Routing": {
+            "type": "Scope",
+            "actions": {
+              "Send_To_Error_Queue": {
+                "type": "ServiceProvider",
+                "inputs": {
+                  "parameters": {
+                    "entityName": "workflow-errors",
+                    "message": {
+                      "contentData":    "@{base64(string(outputs('Build_Enriched_Error')))}",
+                      "contentType":    "application/json",
+                      "messageId":      "@triggerBody()?['errorId']",
+                      "userProperties": {
+                        "severity":         "@variables('severity')",
+                        "incidentCategory": "@variables('incidentCategory')",
+                        "sourceWorkflow":   "@triggerBody()?['sourceWorkflow']",
+                        "environment":      "@parameters('environment_name')"
+                      }
+                    }
+                  },
+                  "serviceProviderConfiguration": {
+                    "connectionName": "serviceBus",
+                    "operationId":    "sendMessage",
+                    "serviceProviderId": "/serviceProviders/serviceBus"
+                  }
+                }
+              },
+              "Send_To_Error_Topic": {
+                "type": "ServiceProvider",
+                "runAfter": { "Send_To_Error_Queue": ["Succeeded"] },
+                "inputs": {
+                  "parameters": {
+                    "entityName": "workflow-errors",
+                    "message": {
+                      "contentData":    "@{base64(string(outputs('Build_Enriched_Error')))}",
+                      "contentType":    "application/json",
+                      "messageId":      "@{concat(triggerBody()?['errorId'], '-topic')}",
+                      "userProperties": {
+                        "severity":         "@variables('severity')",
+                        "incidentCategory": "@variables('incidentCategory')",
+                        "sourceWorkflow":   "@triggerBody()?['sourceWorkflow']",
+                        "environment":      "@parameters('environment_name')",
+                        "eventType":        "workflow.error"
+                      }
+                    }
+                  },
+                  "serviceProviderConfiguration": {
+                    "connectionName":    "serviceBus",
+                    "operationId":       "sendMessage",
+                    "serviceProviderId": "/serviceProviders/serviceBus"
+                  }
+                }
+              },
+              "Set_SB_Status_Success": {
+                "type": "SetVariable",
+                "runAfter": { "Send_To_Error_Topic": ["Succeeded"] },
+                "inputs": { "name": "sbStatus", "value": "SUCCESS" }
+              }
+            }
+          },
+          "Set_SB_Status_Failed": {
+            "type": "SetVariable",
+            "runAfter": { "Scope_ServiceBus_Routing": ["Failed", "TimedOut"] },
+            "inputs": { "name": "sbStatus", "value": "FAILED" }
+          }
+        },
+        "else": { "actions": {} }
+      },
+      "IF_PagerDuty_Enabled": {
+        "type": "If",
+        "runAfter": { "IF_ServiceBus_Enabled": ["Succeeded"] },
+        "expression": {
+          "and": [
+            { "equals": ["@parameters('enable_pagerduty')", true] },
+            {
+              "or": [
+                { "equals": ["@variables('severity')", "CRITICAL"] },
+                { "equals": ["@variables('severity')", "HIGH"] }
+              ]
+            }
+          ]
+        },
+        "actions": {
+          "Scope_PagerDuty": {
+            "type": "Scope",
+            "actions": {
+              "Create_PagerDuty_Incident": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "@{concat(parameters('apim_base_url'), '/api/v1/pagerduty/incidents')}",
+                  "headers": {
+                    "Content-Type":     "application/json",
+                    "X-Correlation-ID": "@triggerBody()?['correlationId']",
+                    "X-API-Version":    "2024-01"
+                  },
+                  "body": {
+                    "routing_key":   "@appsetting('PAGERDUTY_ROUTING_KEY')",
+                    "event_action":  "trigger",
+                    "dedup_key":     "@triggerBody()?['errorId']",
+                    "payload": {
+                      "summary":   "@{concat('[', variables('severity'), '] ', triggerBody()?['errorMessage'])}",
+                      "severity":  "@{toLower(variables('severity'))}",
+                      "source":    "@triggerBody()?['sourceWorkflow']",
+                      "component": "policy-submission-orchestrator",
+                      "group":     "insurance-platform",
+                      "class":     "@variables('incidentCategory')",
+                      "custom_details": {
+                        "correlationId":       "@triggerBody()?['correlationId']",
+                        "workflowRunId":       "@triggerBody()?['workflowRunId']",
+                        "errorCode":           "@triggerBody()?['errorCode']",
+                        "environmentName":     "@triggerBody()?['environmentName']",
+                        "businessCriticality": "@variables('businessCriticality')",
+                        "regulatoryImpact":    "@outputs('Determine_Regulatory_Impact')",
+                        "retryEligible":       "@outputs('Determine_Retry_Eligible')",
+                        "attemptNumber":       "@triggerBody()?['attemptNumber']"
+                      }
+                    },
+                    "links": [
+                      {
+                        "href": "@{concat('https://portal.azure.com/#blade/Microsoft_Azure_EMA/RunbookDetailsBlade/runId/', triggerBody()?['workflowRunId'])}",
+                        "text": "View Logic App Run"
+                      }
+                    ]
+                  },
+                  "retryPolicy": {
+                    "type": "exponential",
+                    "count": 2,
+                    "interval": "PT30S"
+                  }
+                }
+              },
+              "Set_PD_Status_Success": {
+                "type": "SetVariable",
+                "runAfter": { "Create_PagerDuty_Incident": ["Succeeded"] },
+                "inputs": { "name": "pdStatus", "value": "SUCCESS" }
+              }
+            }
+          },
+          "Set_PD_Status_Failed": {
+            "type": "SetVariable",
+            "runAfter": { "Scope_PagerDuty": ["Failed", "TimedOut"] },
+            "inputs": { "name": "pdStatus", "value": "FAILED" }
+          }
+        },
+        "else": { "actions": {} }
+      },
+      "Send_AppInsights_Telemetry": {
+        "type": "Http",
+        "runAfter": { "IF_PagerDuty_Enabled": ["Succeeded"] },
+        "inputs": {
+          "method": "POST",
+          "uri": "https://dc.services.visualstudio.com/v2/track",
+          "headers": { "Content-Type": "application/json" },
+          "body": [
+            {
+              "name":  "@{concat('Microsoft.ApplicationInsights.', appsetting('APPINSIGHTS_INSTRUMENTATIONKEY'), '.Event')}",
+              "time":  "@utcNow()",
+              "iKey":  "@appsetting('APPINSIGHTS_INSTRUMENTATIONKEY')",
+              "tags": {
+                "ai.operation.id":       "@triggerBody()?['correlationId']",
+                "ai.operation.parentId": "@triggerBody()?['workflowRunId']",
+                "ai.cloud.role":         "policy-submission-orchestrator",
+                "ai.cloud.roleInstance": "@triggerBody()?['sourceWorkflow']"
+              },
+              "data": {
+                "baseType": "EventData",
+                "baseData": {
+                  "ver":  2,
+                  "name": "WorkflowError",
+                  "properties": {
+                    "errorId":             "@triggerBody()?['errorId']",
+                    "correlationId":       "@triggerBody()?['correlationId']",
+                    "sourceWorkflow":      "@triggerBody()?['sourceWorkflow']",
+                    "errorCode":           "@triggerBody()?['errorCode']",
+                    "errorMessage":        "@triggerBody()?['errorMessage']",
+                    "severity":            "@variables('severity')",
+                    "businessCriticality": "@variables('businessCriticality')",
+                    "dataClassification":  "@variables('dataClassification')",
+                    "incidentCategory":    "@variables('incidentCategory')",
+                    "retryEligible":       "@{outputs('Determine_Retry_Eligible')}",
+                    "regulatoryImpact":    "@{outputs('Determine_Regulatory_Impact')}",
+                    "environmentName":     "@triggerBody()?['environmentName']"
+                  },
+                  "measurements": {
+                    "attemptNumber": "@triggerBody()?['attemptNumber']",
+                    "httpStatusCode": "@{coalesce(triggerBody()?['httpStatusCode'], 0)}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "Build_Final_Response": {
+        "type": "Compose",
+        "runAfter": { "Send_AppInsights_Telemetry": ["Succeeded", "Failed"] },
+        "inputs": {
+          "errorId":             "@triggerBody()?['errorId']",
+          "correlationId":       "@triggerBody()?['correlationId']",
+          "sourceWorkflow":      "@triggerBody()?['sourceWorkflow']",
+          "workflowRunId":       "@triggerBody()?['workflowRunId']",
+          "errorCode":           "@triggerBody()?['errorCode']",
+          "errorMessage":        "@triggerBody()?['errorMessage']",
+          "timestamp":           "@triggerBody()?['timestamp']",
+          "environmentName":     "@triggerBody()?['environmentName']",
+          "attemptNumber":       "@triggerBody()?['attemptNumber']",
+          "severity":            "@variables('severity')",
+          "businessCriticality": "@variables('businessCriticality')",
+          "dataClassification":  "@variables('dataClassification')",
+          "incidentCategory":    "@variables('incidentCategory')",
+          "impactedSystems":     ["policy-submission-orchestrator", "insurance-policy-saas"],
+          "retryEligible":       "@outputs('Determine_Retry_Eligible')",
+          "escalationPath":      "platform-engineering",
+          "slaBreachRisk":       "@outputs('Determine_SLA_Breach_Risk')",
+          "regulatoryImpact":    "@outputs('Determine_Regulatory_Impact')",
+          "tags":                "@outputs('Build_Tags')",
+          "dbLoggingStatus":     "@variables('dbStatus')",
+          "serviceBusStatus":    "@variables('sbStatus')",
+          "pagerdutyStatus":     "@variables('pdStatus')",
+          "appInsightsStatus":   "@variables('aiStatus')",
+          "enrichedAt":          "@utcNow()"
+        }
+      },
+      "Response_Success": {
+        "type": "Response",
+        "runAfter": { "Build_Final_Response": ["Succeeded"] },
+        "inputs": {
+          "statusCode": 200,
+          "headers": {
+            "Content-Type":     "application/json",
+            "X-Correlation-ID": "@triggerBody()?['correlationId']"
+          },
+          "body": "@outputs('Build_Final_Response')"
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "kind": "Stateful"
+}
