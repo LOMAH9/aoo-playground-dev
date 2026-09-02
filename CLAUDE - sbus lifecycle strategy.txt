@@ -1,0 +1,1206 @@
+Service Bus Message Lifecycle Management & Retry Strategy
+
+Logic Apps Standard — Design Principle & Pattern Standard
+
+Field	Value
+Document ID	INT-STD-004
+Version	1.0
+Status	Approved for org-wide use
+Classification	Internal
+Owner	Integration Architecture
+Applies to	All Logic App Standard workflow apps with Service Bus peek-lock triggers
+Regulatory anchors	FCA SYSC 15A (Operational Resilience), UK GDPR Art. 5(1)(f), 17, 32; SYSC 9 (record keeping)
+Review cycle	6-monthly, or on Logic Apps extension bundle major version change
+Related standards	INT-STD-001 Managed Identity & Secrets; INT-STD-002 Error Handling & Telemetry; INT-STD-003 Data Classification
+1. Purpose
+
+This standard defines the mandatory approach to Service Bus message lifecycle management (complete, abandon, dead-letter, defer, lock renewal) and to retry configuration for HTTP, Blob Storage and Service Bus actions within Logic App Standard workflows.
+
+It exists because the default behaviours of the platform are unsafe for a regulated placement and quotation pipeline. Specifically: an unconfigured abandon path will exhaust MaxDeliveryCount in under ten seconds and silently dead-letter a live RFQ; an unbudgeted retry policy will outlive the message lock and produce duplicate submissions to a partner; and a dead-letter written to a third party's namespace may be unreadable by us, which is a recoverability failure under SYSC 15A.
+
+2. Normative language
+
+MUST / MUST NOT — mandatory; deviation requires a recorded exception (§15).
+SHOULD / SHOULD NOT — strongly recommended; deviation requires a design-note rationale.
+MAY — permitted at the team's discretion.
+
+3. Scope: which workflows this standard governs
+3.1 Classification rule
+
+A workflow is in full scope if its trigger is any Service Bus peek-lock trigger, on either a queue or a topic subscription, on either an internal or an external namespace. This is the entry-point class where the lock is held and where lifecycle decisions are made.
+
+A workflow is in partial scope (retry sections §10 only, no lifecycle sections) if it contains Service Bus send actions, HTTP actions or Blob actions but is triggered by something other than a Service Bus peek-lock trigger (HTTP request, recurrence, child-workflow invocation).
+
+A workflow is out of scope if it neither triggers on Service Bus nor calls any external dependency. In practice this is only pure-transform helper workflows.
+
+Auto-complete Service Bus triggers MUST NOT be used for any message carrying placement, submission, quotation or document payloads. Auto-complete acknowledges the message before the workflow body has succeeded, which loses the message on failure. Auto-complete MAY be used only for non-durable telemetry or heartbeat streams where loss is explicitly acceptable and recorded in the design note.
+
+3.2 Reference application inventory
+
+Every team MUST maintain the equivalent of this table in its repository as docs/lifecycle-inventory.md, and MUST update it in the same pull request as any trigger change.
+
+Workflow	Trigger	Source namespace	Entity	Downstream actions	Scope	Lock budget owner
+wf-ingest-rfq-partner	SB topic subscription, peek-lock	External (partner)	rfq-events/subs/our-org	Blob write, SB send (internal)	Full	Partner-controlled lock
+wf-ingest-document-partner	SB queue, peek-lock	External (partner)	document-notifications	HTTP GET (partner doc API via APIM), Blob write, SB send	Full	Partner-controlled lock
+wf-process-submission	SB queue, peek-lock	Internal	submission-inbound	Blob read, HTTP (Dataverse via APIM), custom .NET function, SB send	Full	Us
+wf-submit-quote-partner	SB queue, peek-lock	Internal	quote-outbound	Blob read, HTTP POST (partner via APIM), Blob write (audit), SB send	Full	Us
+wf-enrich-placement	SB topic subscription, peek-lock	Internal	placement-events/subs/enrichment	HTTP (D365 via APIM), Blob write	Full	Us
+wf-retry-scheduler	SB queue, peek-lock	Internal	retry-scheduled	SB send (scheduled enqueue)	Full	Us
+wf-quarantine-processor	SB queue, peek-lock	Internal	quarantine-central	Blob write (immutable), HTTP (case creation)	Full	Us
+wf-error-handler	HTTP request	n/a	n/a	Blob write, SB send, HTTP	Partial	n/a
+wf-telemetry-emit	Child workflow	n/a	n/a	HTTP (App Insights)	Partial	n/a
+4. Architectural principles
+
+These are the load-bearing decisions. Everything in §7 to §10 follows from them.
+
+P1 — Thin receiver, fat processor.
+A workflow triggered on a peek-lock message MUST hold the lock for the minimum time necessary. Its responsibilities are limited to: authenticate the message, validate structure, persist the raw payload durably (immutable blob), emit an internal work item, complete. All expensive or slow work (partner API calls, enrichment, submission POST) MUST happen in a downstream workflow triggered from an internal queue we control. This decouples the lock horizon from the latency of external systems, and it is the single most effective mitigation for both lock loss and duplicate submission.
+
+P2 — Never lose custody of a message.
+Before any message is completed, abandoned or dead-lettered, its full body and application properties MUST exist in our own immutable blob store with a correlation ID. Custody is ours from the moment of receipt. This is the SYSC 15A recoverability position and it is not negotiable for external inbound traffic.
+
+P3 — A partner's dead-letter queue is not our storage.
+We MUST NOT rely on an external partner's DLQ as our recovery surface. We frequently hold Listen on a subscription without Manage on its $DeadLetterQueue path, and even where we hold it, the partner may purge or reconfigure the entity. Poison messages arriving from external namespaces MUST be quarantined into our own quarantine-central queue and then completed on the partner entity (§7.4).
+
+P4 — Abandon is not a retry mechanism.
+Abandon returns the message for immediate redelivery with no backoff. Abandoning on a transient downstream outage will consume the entire MaxDeliveryCount budget in seconds and dead-letter a valid message. Abandon MUST only be used for the narrow cases in §7.2 / §8.2. Backoff MUST be implemented with scheduled re-enqueue (§9.4), never with abandon loops.
+
+P5 — Explicit configuration only.
+Every action in an in-scope workflow MUST declare an explicit retryPolicy and an explicit limit.timeout. Platform defaults MUST NOT be relied on, because they are version-dependent and cannot be reasoned about in a lock budget.
+
+P6 — The retry budget is subordinate to the lock horizon.
+Retry counts and intervals are derived from the available lock horizon, not chosen for their own sake. Any workflow whose worst-case critical path exceeds its lock horizon MUST be split (P1) rather than have its lock extended.
+
+P7 — At-least-once delivery implies mandatory idempotency.
+Peek-lock guarantees at-least-once, never exactly-once. Every side-effecting action MUST be idempotent: conditional blob writes (If-None-Match: *), idempotency keys on partner POSTs, and deterministic natural keys (UMR + submission reference + payload hash) on internal writes.
+
+P8 — Ambiguous outcomes are reconciled, not retried.
+A network timeout on an outbound POST is not a failure; it is an unknown. Blind retry risks a duplicate quotation reaching the market. Where the partner API exposes a status or reference lookup, ambiguous outcomes MUST be reconciled by query before any retry (§10.3.4).
+
+P9 — Dead-letter carries no personal data.
+DeadLetterReason and DeadLetterErrorDescription are operator-visible, are retained for as long as the DLQ is unattended, and are outside our run-history redaction controls. They MUST contain only a reason code, a correlation ID and a blob pointer. Payload fragments, claimant details, broker contact data and any special category data MUST NOT appear (§13).
+
+P10 — Every terminal decision is evidenced.
+Complete, abandon, dead-letter and quarantine each emit a structured audit record conforming to the SYSC 15A schema in INT-STD-002, including dataClassification.
+
+5. Message lifecycle state model
+                    ┌──────────────────────────────────────┐
+                    │  Peek-lock trigger fires             │
+                    │  lockToken acquired, lock clock runs │
+                    └──────────────────┬───────────────────┘
+                                       ▼
+                         ┌─────────────────────────┐
+                         │ Gate 1: Authenticity    │  ─── fail ──► DEAD-LETTER (internal)
+                         │ claim check, schema,    │              QUARANTINE+COMPLETE (external)
+                         │ tenant/UMR authority    │
+                         └────────────┬────────────┘
+                                      ▼
+                         ┌─────────────────────────┐
+                         │ Gate 2: Custody         │  ─── fail ──► ABANDON
+                         │ persist raw to immutable│              (storage unavailable = transient)
+                         │ blob, emit audit record │
+                         └────────────┬────────────┘
+                                      ▼
+                         ┌─────────────────────────┐
+                         │ Gate 3: Process         │  ─┬─ transient ──► ABANDON or SCHEDULED RETRY
+                         │ business logic,         │   ├─ permanent ──► DEAD-LETTER / QUARANTINE
+                         │ downstream calls        │   └─ dependency ─► DEFER
+                         └────────────┬────────────┘
+                                      ▼
+                                  COMPLETE
+
+Gate ordering is mandatory. Custody (Gate 2) precedes processing (Gate 3) so that no processing failure can result in a message we cannot reproduce.
+
+6. Failure taxonomy
+
+All lifecycle decisions resolve to one of four classes. Teams MUST classify every failure path against this taxonomy in the workflow's design note.
+
+Class	Definition	Terminal action	Delivery count impact
+Permanent	Reprocessing the identical message will fail identically. Schema violation, unknown UMR, unsupported class code, unauthorised sender, non-retryable HTTP status.	Dead-letter (internal) / Quarantine + Complete (external)	None
+Transient	Reprocessing may succeed unchanged. Dependency 5xx, throttling, network fault, storage unavailable.	Abandon (short outage) or Scheduled retry (long outage)	Increments on abandon
+Dependency-wait	Message is valid but arrived before a prerequisite. Quote event ahead of its placement record.	Defer, or scheduled retry	None on defer
+Ambiguous	Side effect may or may not have occurred. Timeout on POST after request dispatch.	Reconcile, then complete or scheduled retry	None
+7. External partner namespace: abandon and dead-letter policy
+7.1 Constraints that apply to external namespaces
+Constraint	Consequence for design
+We do not control LockDuration	Lock horizon is a discovered input, not a design choice. It MUST be documented in the partner integration record and re-verified quarterly.
+We do not control MaxDeliveryCount	Abandon budget is unknown and possibly as low as 1. Treat as untrusted.
+We may lack rights on $DeadLetterQueue	Dead-lettering may be a one-way loss of custody.
+Partner may purge, reconfigure or migrate the entity	DLQ residency time is not under our control.
+Partner may not monitor their DLQ on our behalf	A dead-lettered message may never be actioned.
+Cross-tenant auth (Entra federated identity or SAS)	Auth failures present as lock and receive failures, not business failures.
+
+Rule E-0. Before an external namespace is consumed in production, the integration record MUST capture: LockDuration, MaxDeliveryCount, DefaultMessageTimeToLive, EnableDeadLetteringOnMessageExpiration, whether $DeadLetterQueue read access is granted, whether sessions are enabled, and the contractual position on DLQ ownership. If LockDuration cannot be obtained, assume 30 seconds.
+
+7.2 External queue: decision matrix
+Condition at receipt	Class	Action	Rationale
+Message body not parseable / not valid JSON or XML	Permanent	Quarantine + Complete	Partner DLQ may be unreadable (P3). Custody retained by us.
+Schema valid but fails MRCv3 / CDR 3.0 / ACORD GRLC contract validation	Permanent	Quarantine + Complete	Contract breach. Raise partner incident from quarantine processor.
+Unknown or unauthorised UMR, or sender not authorised for that UMR	Permanent	Quarantine + Complete	Security event. Emit to SIEM. Never abandon: repeated redelivery amplifies a probing attack.
+Duplicate (payload hash + messageId already processed)	Permanent (benign)	Complete	No quarantine. Emit dedup telemetry only.
+Our blob storage unavailable (Gate 2 fails)	Transient	Abandon	Custody cannot be established, so we must not complete. Short outage only.
+Our blob storage unavailable, and abandon count ≥ 2	Transient (sustained)	Abandon + circuit break	Disable the trigger (§9.5). Do not burn the partner's delivery budget.
+Partner document-retrieval API returns retryable status after in-line retries exhausted	Transient	Abandon if deliveryCount < 3, else Quarantine + Complete	Bounded. Quarantine record drives scheduled retry on our side.
+Partner document-retrieval API returns non-retryable status (400/403/404/410/422)	Permanent	Quarantine + Complete	
+Internal Service Bus send fails (custody handoff)	Transient	Abandon	Blob custody exists; abandon is safe and cheap.
+deliveryCount ≥ (documented MaxDeliveryCount − 1)	Escalation	Quarantine + Complete	Pre-empt the partner's automatic dead-letter so the message ends up in our store, not theirs.
+Message TTL near expiry (enqueuedTimeUtc + TTL − now < 2 × lock duration)	Escalation	Quarantine + Complete	Prevents silent expiry loss.
+
+Rule E-1. DeadLetter MUST NOT be invoked on an external partner entity unless all of the following hold and are recorded in the integration record: the partner contractually owns DLQ triage; we hold read access to $DeadLetterQueue; and a monitored reconciliation workflow drains it. In the absence of all three, use Quarantine + Complete.
+
+Rule E-2. Where Rule E-1 is satisfied and dead-lettering is permitted, the workflow MUST still perform Quarantine first, then dead-letter, so custody exists on both sides.
+
+7.3 External topic subscription: additional considerations
+
+Topic subscriptions differ from queues in ways that materially change the policy.
+
+Consideration	Policy
+Per-subscription DLQ. Each subscription has its own DLQ; a poison message dead-lettered on our subscription does not affect other subscribers.	Reduces blast radius, but does not change Rule E-1. Our subscription's DLQ is still on the partner's namespace.
+Filter evaluation exceptions. If EnableDeadLetteringOnFilterEvaluationExceptions is true (default) on a subscription with a SQL filter, messages that break filter evaluation are dead-lettered before we ever see them.	Where the partner allows us to define the filter, prefer correlation filters over SQL filters. Correlation filters cannot throw. If a SQL filter is unavoidable, the integration record MUST note that a class of loss exists outside our observability, and a subscription-DLQ depth alert MUST be requested from the partner.
+Fan-out re-delivery. Our subscription is one of many. Abandoning affects only our copy.	Abandon is safer here than on a shared queue, but P4 still applies.
+Filter drift. Partner adds a new event type or changes Subject/Label semantics. Our filter silently stops matching, or starts matching unhandled types.	Workflows MUST implement a default branch that quarantines unrecognised message types rather than completing them. A "zero messages received" alert (§12) MUST exist for every external subscription, because silence is the failure mode of filter drift.
+Auto-forward. Partner may configure ForwardTo on the subscription.	Not under our control; note in integration record.
+
+Rule E-3. Every external topic subscription workflow MUST branch on message type explicitly and MUST route the unmatched case to Quarantine + Complete with reason code UNRECOGNISED_MESSAGE_TYPE. An unconditional else that completes the message is prohibited.
+
+7.4 The Quarantine + Complete pattern
+
+This is the primary poison-message pattern for external sources.
+
+Write the full raw message (body, all application and system properties, messageId, sequenceNumber, enqueuedTimeUtc, deliveryCount, source entity) to immutable blob at quarantine/{yyyy}/{MM}/{dd}/{correlationId}.json, using If-None-Match: * and explicit x-ms-blob-content-type: application/json.
+Send a quarantine control message to the internal quarantine-central queue containing only: correlationId, blobUri, reasonCode, sourceNamespace, sourceEntity, dataClassification, originalMessageId, deliveryCount. No payload.
+Emit the SYSC 15A audit record.
+Complete on the partner entity.
+
+Step 4 occurs only if steps 1 and 2 both succeed. If either fails, Abandon.
+
+wf-quarantine-processor then raises a case, triggers partner notification where the reason code indicates a contract breach, and exposes the item for operator-driven replay.
+
+8. Internal namespace: abandon and dead-letter policy
+8.1 Constraints and freedoms
+
+On namespaces we own, the DLQ is a first-class operational surface. We control LockDuration, MaxDeliveryCount, TTL and forwarding, and we can read and replay the DLQ. Dead-lettering is therefore the correct terminal action for permanent failures, and quarantine-to-blob becomes a complement rather than a substitute.
+
+Baseline entity configuration (all internal queues and subscriptions carrying placement, submission or document traffic):
+
+Property	Value	Rationale
+LockDuration	See §9.2 (60s or 300s by profile)	
+MaxDeliveryCount	5	Deliberately below the default of 10. With scheduled retry (§9.4) doing the backoff work, in-line abandons should be rare; a high count only delays detection.
+DefaultMessageTimeToLive	7 days (14 days for submission-outbound)	Must exceed the longest credible partner outage plus a working weekend.
+EnableDeadLetteringOnMessageExpiration	true	Expiry must be visible, never silent.
+EnableBatchedOperations	true	
+RequiresDuplicateDetection	true on ingress entities	DuplicateDetectionHistoryTimeWindow = 1 hour minimum. Complements, does not replace, application idempotency (P7).
+ForwardDeadLetteredMessagesTo	quarantine-central on ingress entities; unset on quarantine-central itself	Centralises triage. Note: cannot be set on a DLQ that would forward to itself.
+RequiresSession	true only where per-UMR ordering is required	See §9.6.
+SKU	Premium	Required for VNet integration, private endpoints, predictable throughput and larger message size.
+
+Namespaces MUST be Premium tier with public network access disabled and private endpoints only, per INT-STD-001.
+
+8.2 Internal queue: decision matrix
+Condition	Class	Action	Reason code
+Malformed body, schema violation	Permanent	Dead-letter	SCHEMA_INVALID
+Business rule rejection (unknown A34 class code, binding authority expired, UMR not found in Dataverse)	Permanent	Dead-letter	BUSINESS_RULE_REJECTED
+Referenced blob missing (404 on read)	Permanent	Dead-letter	PAYLOAD_NOT_FOUND
+Referenced blob present but hash mismatch against message	Permanent	Dead-letter + security event	PAYLOAD_INTEGRITY_FAILURE
+Partner API non-retryable status (400/403/404/409-not-duplicate/410/413/415/422)	Permanent	Dead-letter	PARTNER_REJECTED_{status}
+Partner API returns 409 with duplicate-submission semantics	Permanent (benign)	Complete	DUPLICATE_ACCEPTED
+Partner API retryable status, in-line retries exhausted, outage < lock horizon	Transient	Abandon if deliveryCount < 3	
+Partner API retryable status, deliveryCount ≥ 3	Transient (sustained)	Complete + scheduled retry (§9.4)	DEFERRED_TO_RETRY_QUEUE
+Circuit breaker open for target dependency	Transient	Complete + scheduled retry at breaker half-open time	CIRCUIT_OPEN
+APIM returns 429 with Retry-After > remaining lock horizon	Transient	Complete + scheduled retry at Retry-After	THROTTLED
+Blob write failure (5xx / 503 ServerBusy) after retries	Transient	Abandon	
+Prerequisite record not yet present (placement not created)	Dependency-wait	Defer if resumption is event-driven; Complete + scheduled retry if time-driven	AWAITING_PREREQUISITE
+MessageLockLostException on any lifecycle action	Transient	Fail the run. No action.	LOCK_LOST
+Ambiguous outcome (timeout after dispatch), reconciliation confirms success	Ambiguous → resolved	Complete	RECONCILED_SUCCESS
+Ambiguous outcome, reconciliation confirms not received	Ambiguous → resolved	Abandon or scheduled retry	RECONCILED_ABSENT
+Ambiguous outcome, reconciliation unavailable	Ambiguous	Complete + scheduled retry with idempotency key	RECONCILE_UNAVAILABLE
+
+Rule I-1. Abandon is permitted only where deliveryCount < 3 and the expected recovery time is shorter than the lock duration. Beyond that threshold, transition to scheduled retry. This bounds delivery-count consumption at 3 of the 5 available, leaving headroom for genuine infrastructure redelivery.
+
+Rule I-2. A dead-letter MUST be preceded by a quarantine blob write (P2), even internally. The DLQ is an operational surface, not an evidential one; blob is the evidential store and is immutable.
+
+8.3 Internal topic subscription: additional considerations
+Consideration	Policy
+One publisher, many subscribers, independent DLQs	Dead-lettering on one subscription MUST NOT be interpreted as a global failure of that business event. Reason codes MUST be namespaced by subscription.
+A malformed publication will dead-letter across all subscriptions simultaneously	The alert rule for correlated multi-subscription DLQ growth MUST page the publishing team, not each consuming team. See §12.
+Filter design	Use correlation filters (Subject, CorrelationId, or application properties such as eventType, classOfBusiness) in preference to SQL filters. Where a SQL filter is used, EnableDeadLetteringOnFilterEvaluationExceptions MUST remain true and the subscription DLQ MUST be forwarded to quarantine-central.
+Subscription proliferation	Each new subscription is a new lock budget, a new DLQ and a new alert. Adding a subscription MUST include the §3.2 inventory entry and the §9.3 lock budget worksheet.
+Ordering across subscriptions	None is guaranteed. Workflows MUST NOT assume a sibling subscription has processed the same event.
+9. Lock duration and lock renewal
+9.1 Mechanics
+
+Under peek-lock, the broker grants exclusive access to a message for LockDuration. The maximum permitted LockDuration is 5 minutes. Renewal resets the lock for a further full LockDuration from the moment of renewal; it does not accumulate. There is no broker-side cap on the number of renewals, but the message TTL continues to run and MaxDeliveryCount is unaffected by renewal. When the lock expires, the message becomes visible to other receivers and deliveryCount increments on the next delivery.
+
+Two renewal mechanisms are available in Logic Apps Standard:
+
+Automatic renewal by the built-in connector's host runtime. The Service Bus in-app connector is service-provider based and is built on the Azure Functions Service Bus extension, so the host-level settings apply. The relevant host.json settings under extensions.serviceBus include maxAutoLockRenewalDuration, autoCompleteMessages, prefetchCount, maxConcurrentCalls, maxMessageBatchSize, sessionIdleTimeout and clientRetryOptions. The same settings block is used in Logic App Standard host.json. 
+Microsoft Learn
+GitHub
+
+Explicit renewal actions. From extension bundle version 1.81.x, the in-app connector provides peek-lock triggers and a corresponding set of peek-lock management actions for queues and topic subscriptions. These newer operations allow peek-lock work to be started and completed from any runtime instance in the pool, removing the earlier requirement for VNet integration and fixed instance counts that the previous client SDK imposed. The connector surface includes complete, defer, abandon, dead-letter and renew-lock operations for messages in queues and topic subscriptions. 
+Microsoft Community Hub
+GitHub
+
+Rule L-0. Workflow apps MUST target extension bundle 1.81.x or later and MUST use the newer peek-lock trigger and action set. The instance-affinity behaviour of the older operations is incompatible with elastic scale-out and is a known source of LOCK_LOST under load.
+
+9.2 Variables that determine lock duration and renewal on internal namespaces
+
+The following are the design inputs. Each MUST be evaluated and recorded.
+
+#	Variable	How it drives the decision
+V1	Worst-case critical path duration	The sum of every action's worst-case duration including its full retry budget (§10.1). This is the primary driver.
+V2	Location of downstream dependencies	In-network via private endpoint and internal APIM: low, predictable latency, tight variance. External via APIM egress, partner WAN, partner rate limiting: high variance, long tails. External dependencies inflate V1 disproportionately and are the usual reason a workflow must be split under P1.
+V3	Payload size	Document and MRC payloads drive blob read/write time and, where a custom .NET function performs hashing or MIME inspection, CPU time. Size-gated processing thresholds (see the binary-handling function) must be reflected in the budget.
+V4	Concurrency and throttling	Higher maxConcurrentCalls and higher workflow run concurrency increase per-message latency under load and increase the probability that a run sits in a waiting state while its lock runs down. Concurrency settings can be exceeded in some scenarios; rather than failing runs, the platform queues them in a waiting state governed by maximumWaitingRuns, and with a Service Bus trigger these changes must be tested carefully so that runs do not wait longer than the message lock timeout.
+V5	Prefetch	Prefetched messages hold locks from the moment of prefetch, not from the moment of processing. Prefetch effectively shortens the usable lock horizon for messages at the back of the buffer.
+V6	Cold start and scale-out latency	On a scaled-to-zero or newly scaled instance, the first run absorbs host warm-up. Budget 20–30 seconds of headroom on workload profiles that scale from zero.
+V7	Failure detection versus recovery time trade-off	A long lock delays redelivery after an instance failure by up to the full lock duration. A short lock forces more renewals and increases the number of points at which a renewal can be lost.
+V8	Message TTL	Renewal does not extend TTL. A message renewed repeatedly can still expire. Renewal horizons MUST be short relative to TTL.
+V9	Session state	Session locks are held at session level, not message level, and are governed by different settings (sessionIdleTimeout, session-level renewal). See §9.6.
+9.3 Mandated lock profiles (internal namespaces)
+Profile	LockDuration	maxAutoLockRenewalDuration	Applies to
+A — Thin receiver	60 s	00:02:00	Validate, persist to blob, emit internal message, complete. Target for all new ingress workflows under P1.
+B — Standard processor	300 s (5 min)	00:10:00	Internal-only downstream calls (Dataverse, D365 via internal APIM), moderate payloads.
+C — External-facing processor	300 s (5 min)	00:15:00	Outbound submission to PPL / Transcriber / partner APIs via APIM egress. Requires an approved lock budget worksheet.
+D — Long-running	Not permitted	—	Any workload with a worst-case path over 15 minutes MUST be restructured under P1 or moved to a Durable pattern with the message completed at handoff.
+
+Rule L-1. The 70% rule. WorstCaseCriticalPath ≤ 0.7 × EffectiveLockHorizon, where EffectiveLockHorizon is maxAutoLockRenewalDuration when automatic renewal is in effect, otherwise LockDuration. The 30% reserve absorbs V6 cold start, V4 waiting-run latency and renewal jitter.
+
+Rule L-2. Every in-scope workflow MUST carry a lock budget worksheet in its repository, reviewed at design review and re-validated whenever any timeout or retry policy changes. Required format:
+
+Workflow:                  wf-submit-quote-partner
+Profile:                   C
+LockDuration:              300 s
+maxAutoLockRenewalDuration:900 s   (EffectiveLockHorizon)
+70% ceiling:               630 s
+
+  Action                        Timeout   Retries  Interval        Worst case
+  ─────────────────────────────────────────────────────────────────────────────
+  Read_Submission_Blob          PT30S     2 fixed  PT5S            100 s
+  Get_Partner_Token (APIM)      PT15S     2 fixed  PT3S             51 s
+  Post_Quote_Partner (APIM)     PT45S     3 expo   PT10S–PT60S     250 s
+  Write_Audit_Blob              PT30S     2 fixed  PT5S            100 s
+  Send_Internal_Confirmation    PT20S     2 fixed  PT5S             70 s
+  Complete_Message              PT20S     1 fixed  PT2S             42 s
+  Orchestration overhead (est.)                                     20 s
+  ─────────────────────────────────────────────────────────────────────────────
+  TOTAL                                                            633 s   ✗ BREACH
+
+Remediation: reduce Post_Quote_Partner to 2 retries (worst case 195 s),
+             new total 578 s ✓ (92% of ceiling — accept, monitor P99)
+
+The worked breach above is deliberate. It is the common failure: two independently reasonable retry policies that together exceed the budget. This is why P5 and L-2 exist.
+
+9.4 Scheduled retry (the correct backoff mechanism)
+
+Where an outage exceeds the lock horizon, the message MUST be moved out of the lock rather than held or abandoned.
+
+Compute the next attempt time using exponential backoff with jitter from the message's attemptCount application property.
+Send a new message to retry-scheduled with ScheduledEnqueueTimeUtc set to that time, attemptCount incremented, and the original correlationId, quarantine blob URI and target descriptor preserved.
+Complete the original message.
+
+wf-retry-scheduler re-emits the message onto its original work queue when the scheduled time arrives.
+
+Mandated backoff schedule (jitter: uniform ±20%):
+
+Attempt	Delay	Cumulative
+1	30 s	30 s
+2	2 min	2.5 min
+3	8 min	10.5 min
+4	30 min	41 min
+5	2 h	2 h 41 min
+6	6 h	8 h 41 min
+7	12 h	20 h 41 min
+8 (final)	—	Dead-letter to quarantine-central, reason RETRY_BUDGET_EXHAUSTED, raise P2 incident
+
+For submission-outbound traffic with a market deadline, the schedule MUST be truncated at the deadline minus one hour and escalated to manual intervention rather than continuing to retry past the point of business value.
+
+Rule L-3. ScheduledEnqueueTimeUtc beyond the entity TTL is invalid. The scheduler MUST validate that the computed time falls within TTL and dead-letter to quarantine if not.
+
+9.5 Circuit breaking
+
+Repeated dependency failure MUST stop new work rather than grinding the retry queue.
+
+Failure state is held in a Table Storage or Redis entry keyed by dependency (partner:ppl:submission, internal:dataverse), holding state, consecutiveFailures, openedAt, halfOpenAt.
+Threshold: 5 consecutive terminal failures within 2 minutes opens the breaker.
+Open duration: 5 minutes, then half-open (single probe).
+In-scope workflows MUST check breaker state before invoking the dependency and, if open, take the Complete + scheduled retry path with nextAttempt = halfOpenAt + jitter.
+Where the breaker remains open for more than 15 minutes, the Service Bus trigger SHOULD be disabled via the Management API by an automated runbook to stop delivery-count consumption entirely, and re-enabled on breaker close. Trigger disable is a recorded operational action under SYSC 15A.
+9.6 Sessions
+
+Sessions MUST be used only where strict per-key ordering is a business requirement, for example serialising all events for a single UMR or a single submission reference. They impose real constraints:
+
+Session locks are held at session level. A single poison message blocks its entire session until dead-lettered or completed.
+Session triggers on the built-in connector follow a long-polling pattern whose configuration is governed by the Azure Functions setting clientRetryOptions:tryTimeout, whereas non-session triggers follow a continuous-polling pattern fully managed by the connector. 
+microsoft
+Session-enabled entities constrain concurrency by maxConcurrentSessions rather than maxConcurrentCalls, and throughput is bounded by session key cardinality.
+
+Rule L-4. On session-enabled entities, Abandon MUST NOT be used for anything other than a genuinely momentary fault, because the head-of-line block affects every subsequent message for that UMR. Permanent failures MUST be dead-lettered immediately so the session can advance.
+
+9.7 Host configuration baseline
+jsonc
+// host.json — Logic App Standard
+{
+  "version": "2.0",
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle.Workflows",
+    "version": "[1.81.0, 2.0.0)"
+  },
+  "extensions": {
+    "serviceBus": {
+      "autoCompleteMessages": false,          // MANDATORY. Lifecycle is explicit.
+      "maxAutoLockRenewalDuration": "00:10:00",
+      "prefetchCount": 0,                     // See Rule L-5
+      "maxConcurrentCalls": 8,
+      "maxConcurrentSessions": 4,
+      "maxMessageBatchSize": 1,               // One message, one run. See Rule L-6
+      "sessionIdleTimeout": "00:01:00",
+      "transportType": "amqpWebSockets",
+      "clientRetryOptions": {
+        "mode": "exponential",
+        "tryTimeout": "00:00:30",
+        "delay": "00:00:00.80",
+        "maxDelay": "00:00:20",
+        "maxRetries": 3
+      }
+    }
+  },
+  "workflow": {
+    "settings": {
+      "Runtime.Trigger.MaximumWaitingRuns": "10"
+    }
+  }
+}
+
+Rule L-5. prefetchCount MUST be 0 on all entities in scope of this standard. Prefetching starts the lock clock before the message reaches a workflow run (V5) and is a known cause of LOCK_LOST under variable processing time. Prefetch MAY be raised only with an approved exception and a re-validated lock budget that accounts for buffer residency.
+
+Rule L-6. maxMessageBatchSize MUST be 1 for all workflows performing side-effecting downstream work. Batching couples the lock horizons of unrelated messages: the slowest message in the batch determines whether the whole batch's locks survive.
+
+Rule L-7. clientRetryOptions governs the connector's own communication with the broker only; it does not retry workflow actions. It MUST be configured with maxDelay well below LockDuration so that broker-level retries cannot themselves consume the lock.
+
+Set ServiceProviders.ServiceBus.MessageSenderOperationTimeout where large outbound messages are sent, and tune Runtime.ServiceProviders.ServiceBus.MessageSenderPoolSizePerProcessorCount only under load-test evidence.
+
+10. Retry strategy
+10.1 The retry budget formula
+
+For any action:
+
+WorstCase = (RetryCount + 1) × Timeout + Σ(RetryIntervals)
+
+For exponential policies, the interval sum is bounded by minimumInterval and maximumInterval; compute against maximumInterval for the worst case. A workflow's critical path is the sum of WorstCase for every action on the longest branch, plus an orchestration overhead allowance of 20 seconds (stateful) or 5 seconds (stateless).
+
+Rule R-0. Every action MUST declare both retryPolicy and limit.timeout explicitly. "retryPolicy": { "type": "none" } is a valid and often correct declaration; an absent policy is not.
+
+Rule R-1. Retry policies apply only to transient conditions. Non-retryable HTTP statuses MUST NOT be retried. Because the Logic Apps retry policy does not discriminate by status code, the workflow MUST either use "type": "none" with an explicit conditional retry loop, or set limit.timeout and retry counts such that a non-retryable failure's cost is acceptable. The recommended pattern is §10.2.3.
+
+10.2 HTTP actions
+10.2.1 Status code taxonomy
+Status	Class	In-line retry	Terminal action if unresolved
+200, 201, 202, 204	Success	—	Complete
+400 Bad Request	Permanent	No	Dead-letter PARTNER_REJECTED_400
+401 Unauthorized	Conditional	One token refresh, then one retry	Dead-letter AUTH_FAILURE
+403 Forbidden	Permanent	No	Dead-letter + security event AUTHZ_FAILURE
+404 Not Found	Permanent	No	Dead-letter RESOURCE_NOT_FOUND
+405, 406, 415	Permanent (contract)	No	Dead-letter CONTRACT_VIOLATION
+408 Request Timeout	Transient	Yes	Scheduled retry
+409 Conflict	Context-dependent	No	If idempotency key matched: Complete as DUPLICATE_ACCEPTED. If genuine state conflict: Dead-letter STATE_CONFLICT. Teams MUST determine which semantics the partner uses and document it.
+410 Gone	Permanent	No	Dead-letter RESOURCE_GONE
+412 Precondition Failed	Context-dependent	No	On conditional blob write: success. Otherwise dead-letter.
+413 Payload Too Large	Permanent	No	Dead-letter PAYLOAD_TOO_LARGE. Emit sizing telemetry.
+422 Unprocessable Entity	Permanent	No	Dead-letter VALIDATION_REJECTED. Capture the partner's validation detail into the quarantine record (redacted per §13).
+425 Too Early	Transient	Yes	Scheduled retry
+429 Too Many Requests	Transient (governed)	Only if Retry-After ≤ remaining lock horizon	Otherwise Complete + scheduled retry at Retry-After
+500 Internal Server Error	Transient	Yes	Scheduled retry
+501 Not Implemented	Permanent	No	Dead-letter CAPABILITY_MISSING
+502 Bad Gateway	Transient	Yes	Scheduled retry
+503 Service Unavailable	Transient	Yes, honour Retry-After if present	Scheduled retry + circuit breaker signal
+504 Gateway Timeout	Ambiguous	No blind retry	Reconcile (§10.3.4)
+No response / connection failure	Ambiguous for POST/PUT/PATCH; transient for GET	GET: yes. POST: no.	Reconcile
+
+Rule R-2. 429 and 503 responses MUST honour Retry-After where present. A fixed retry interval that ignores a broker-supplied backoff hint will amplify congestion and is a common cause of partner rate-limit escalation.
+
+10.2.2 Configuration by target location
+
+APIM is the mandated egress and ingress point for all HTTP traffic. Retry configuration differs by what sits behind it.
+
+Target class	Route	Timeout	Retry type	Count	Interval	Worst case	Notes
+Internal, low-latency (Dataverse, D365 via internal APIM, private endpoint)	APIM internal VNet mode	PT20S	fixed	2	PT5S	70 s	Latency variance is low, so exponential backoff adds no value and consumes budget.
+Internal, heavy (document services, custom .NET function endpoints, Databricks jobs)	APIM internal VNet mode	PT45S	fixed	2	PT10S	155 s	
+External partner, synchronous (PPL NextGen, Transcriber submission)	APIM egress, partner WAN	PT45S	exponential	3	PT10S min, PT60S max	250 s	Long tails and partner-side queueing justify exponential.
+External partner, token/auth endpoint	APIM egress	PT15S	fixed	2	PT3S	51 s	Short and cheap. Token acquisition failure should surface fast.
+External partner, document download	APIM egress	PT60S	exponential	2	PT10S min, PT30S max	220 s	Size-dependent; validate against V3.
+External, unmetered/unknown SLA	APIM egress	PT30S	none	0	—	30 s	Retry via scheduled queue only. Do not hold a lock against an unknown SLA.
+
+Rule R-3. Where a target sits outside the corporate network, in-line retry counts MUST NOT exceed 3 and the worst case MUST NOT exceed 40% of the effective lock horizon on its own. External variance is the dominant risk to the lock budget.
+
+Rule R-4. APIM-generated errors MUST be distinguished from backend errors before classification. APIM returns its own error envelope for policy failures (subscription key, IP restriction, rate limit, backend unreachable). A 403 from APIM's IP-filter policy is an infrastructure fault, not a partner rejection, and misclassifying it will dead-letter valid submissions. The APIM product MUST be configured to surface a distinguishing header (X-Gateway-Error-Source: apim|backend) and workflows MUST branch on it.
+
+Rule R-5. APIM's own forward-request timeout MUST be set shorter than the Logic App action's limit.timeout, so that the gateway returns a structured 504 rather than the Logic App abandoning the connection. An abandoned connection produces an ambiguous outcome; a gateway 504 at least tells us the gateway gave up.
+
+10.2.3 The conditional retry pattern
+
+Because the platform retry policy cannot discriminate by status code, the mandated pattern for external POSTs is:
+
+jsonc
+{
+  "Post_Quote_Partner": {
+    "type": "Http",
+    "inputs": {
+      "method": "POST",
+      "uri": "@parameters('partnerSubmissionEndpoint')",
+      "headers": {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "@triggerBody()?['applicationProperties']?['correlationId']",
+        "X-Correlation-Id": "@triggerBody()?['applicationProperties']?['correlationId']",
+        "Ocp-Apim-Subscription-Key": "@appsetting('ApimSubscriptionKey')"
+      },
+      "body": "@body('Build_Submission_Payload')",
+      "authentication": { "type": "ManagedServiceIdentity", "audience": "@parameters('partnerAudience')" },
+      "retryPolicy": { "type": "none" },          // discrimination handled below
+      "limit": { "timeout": "PT45S" }
+    },
+    "runtimeConfiguration": {
+      "secureData": { "properties": [ "inputs", "outputs" ] }
+    },
+    "operationOptions": "DisableAsyncPattern, SuppressWorkflowHeaders"
+  }
+}
+
+The action runs with "retryPolicy": { "type": "none" } inside an Until loop bounded by attempt count and by remaining lock horizon, with the loop's exit condition evaluating the status code against the taxonomy. SuppressWorkflowHeaders prevents x-ms-workflow-* headers leaking run identifiers to the partner, which is both a hygiene and a data-minimisation control.
+
+secureData on inputs and outputs is mandatory on every action touching submission payloads, tokens or document bytes, per P9 and INT-STD-001.
+
+Rule R-6. DisableAsyncPattern MUST be set on partner POSTs unless the partner's 202-plus-Location polling contract is explicitly supported and its polling duration has been included in the lock budget. Unbounded async polling inside a locked message is a guaranteed lock loss.
+
+10.3 Blob Storage actions
+10.3.1 Access method
+
+Blob operations MUST use the Storage REST API with managed identity, not the built-in blob connector, for the reasons already established as org practice: the connector provides no control over Content-Type, and content-type correctness is a functional requirement for MRC and document artefacts. Every request MUST carry x-ms-version. Omitting it causes Storage to negotiate a pre-OAuth service version and return a 403 that superficially resembles an RBAC misconfiguration.
+
+10.3.2 Status taxonomy
+Status / error code	Class	Action
+201 Created, 200 OK, 202 Accepted	Success	Continue
+409 BlobAlreadyExists with If-None-Match: *	Success (idempotent)	Treat as success. Emit dedup telemetry.
+412 ConditionNotMet with If-None-Match: *	Success (idempotent)	Treat as success.
+400 InvalidHeaderValue, OutOfRangeInput, InvalidXmlDocument	Permanent (defect)	Dead-letter STORAGE_REQUEST_INVALID. This is a code defect; page the owning team.
+403 AuthenticationFailed on first attempt	Conditional	Single token refresh and retry, then permanent.
+403 AuthorizationPermissionMismatch	Permanent (config)	Dead-letter STORAGE_RBAC_FAILURE + P2 incident.
+403 with missing x-ms-version	Permanent (defect)	Dead-letter STORAGE_VERSION_MISSING. Distinguishable by the absence of the header in the request record.
+404 ContainerNotFound	Permanent (config)	Dead-letter STORAGE_CONTAINER_MISSING + P2 incident.
+404 BlobNotFound on read	Permanent (data)	Dead-letter PAYLOAD_NOT_FOUND.
+409 BlobImmutableDueToPolicy, BlobImmutableDueToLegalHold	Permanent	Dead-letter IMMUTABILITY_CONFLICT. Never retry against immutable storage; retries will never succeed and generate audit noise.
+412 on If-Match (optimistic concurrency)	Transient (contention)	Re-read and retry, max 3, jittered.
+413 RequestBodyTooLarge	Permanent	Dead-letter PAYLOAD_TOO_LARGE.
+429 TooManyRequests	Transient	Retry with backoff, honour Retry-After.
+500 InternalError, OperationTimedOut	Transient	Retry.
+503 ServerBusy	Transient	Retry with exponential backoff. Partition-level throttling; consider key distribution if frequent.
+
+Rule R-7. Idempotent writes MUST use If-None-Match: *, and the 409/412 responses that result MUST be treated as success. A workflow that dead-letters on BlobAlreadyExists has misidentified successful redelivery as failure and will lose valid messages.
+
+10.3.3 Configuration
+Operation	Location	Timeout	Retry	Count	Interval	Worst case
+Write, ≤ 4 MB	Private endpoint, same region	PT30S	fixed	2	PT5S	100 s
+Write, > 4 MB (block upload)	Private endpoint, same region	PT60S	fixed	2	PT10S	200 s
+Read	Private endpoint, same region	PT30S	fixed	2	PT5S	100 s
+Metadata / property set	Private endpoint	PT15S	fixed	2	PT3S	51 s
+Any operation, cross-region	Cross-region	PT60S	exponential	3	PT5S–PT30S	305 s. Requires exception; cross-region storage in the critical path of a locked message is discouraged.
+
+Storage is in-network via private endpoint, so fixed is correct. Exponential backoff adds no value against a low-variance dependency and consumes lock budget that the external HTTP call needs more.
+
+10.3.4 Ambiguous outcome reconciliation
+
+On timeout or connection failure during a side-effecting call:
+
+If the operation was a conditional blob write, re-read the blob. Presence with a matching MD5 means success.
+If the operation was a partner POST and the partner exposes a submission status endpoint, GET by Idempotency-Key or submission reference. A found record means success; complete.
+If the partner exposes no reconciliation endpoint, the design note MUST record this as an accepted residual risk, the POST MUST carry an Idempotency-Key, and the retry MUST go via the scheduled queue with a minimum 30-second delay so that an in-flight request has time to land.
+
+Rule R-8. Partner integrations without a reconciliation mechanism MUST be raised at partner onboarding as a control gap. For a placement or quotation submission, a duplicate reaching the market is a market conduct issue, not merely a technical one.
+
+10.4 Service Bus actions
+
+Service Bus lifecycle actions have their own retry semantics and are frequently misconfigured.
+
+Action	Failure mode	Retry policy	Rationale
+Complete	MessageLockLostException	none	The lock is gone. Retrying cannot succeed. Fail the run; the broker will redeliver and idempotency (P7) will make the reprocessing harmless. Retrying here masks the real problem and delays redelivery.
+Complete	Transient broker error / ServerBusy	fixed, count 2, PT2S, timeout PT20S	Worst case 46 s. Must be small; this action runs at the end of the budget when the least headroom remains.
+Abandon	MessageLockLost	none	As above. The message will redeliver on lock expiry regardless.
+Abandon	Transient	fixed, count 2, PT2S, timeout PT20S	
+Dead-letter	MessageLockLost	none	Fail the run. On redelivery the same permanent condition will recur and dead-lettering will be reattempted.
+Dead-letter	Transient	fixed, count 3, PT3S, timeout PT20S	Slightly more generous than complete: failing to dead-letter means the message loops until MaxDeliveryCount, which is a worse outcome.
+Renew lock	Any	fixed, count 2, PT1S, timeout PT10S	Worst case 32 s. Renewal races lock expiry; a long retry interval guarantees the race is lost. Renewal MUST be attempted no later than 50% of LockDuration elapsed.
+Defer	Transient	fixed, count 2, PT2S, timeout PT20S	The sequenceNumber MUST be persisted before deferring, or the message becomes unreachable.
+Send	ServerBusy (throttle)	exponential, count 4, PT2S–PT30S, timeout PT30S	Namespace-level throttling is transient and responds well to backoff.
+Send	MessageSizeExceededException	none	Permanent. Restructure to claim-check (blob pointer) and dead-letter the source with MESSAGE_TOO_LARGE.
+Send	QuotaExceededException (entity full)	exponential, count 3, PT10S–PT60S	Transient but indicates a consumer outage downstream. MUST raise a P2 alert on first occurrence.
+Send	UnauthorizedAccessException	none	Permanent config/RBAC fault. P2 incident.
+Send (to external namespace)	Any transient	exponential, count 3, PT5S–PT45S, timeout PT30S	Treat as external per R-3.
+
+Rule R-9. MessageLockLostException MUST NOT be retried anywhere. It MUST be caught, logged with reason code LOCK_LOST, correlated against the lock budget worksheet, and surfaced on a dedicated metric. A rising LOCK_LOST rate is the leading indicator that a lock budget has become invalid, typically because a dependency's latency profile has shifted. This is a monitored resilience metric under SYSC 15A.
+
+Rule R-10. Lifecycle actions MUST be placed in a scope with runAfter covering Succeeded, Failed, Skipped and TimedOut from the preceding scope. Incomplete runAfter wiring is the most common defect found in review: a Skipped upstream action leaves the message neither completed nor abandoned, and the workflow terminates leaving the message to expire its lock and redeliver.
+
+10.5 Consolidated worst-case reference
+Action class	Timeout	Retry	Count	Interval	Worst case
+HTTP internal, low-latency	PT20S	fixed	2	PT5S	70 s
+HTTP internal, heavy	PT45S	fixed	2	PT10S	155 s
+HTTP external, sync	PT45S	exponential	3	PT10S–PT60S	250 s
+HTTP external, token	PT15S	fixed	2	PT3S	51 s
+HTTP external, unknown SLA	PT30S	none	0	—	30 s
+Blob write ≤ 4 MB	PT30S	fixed	2	PT5S	100 s
+Blob write > 4 MB	PT60S	fixed	2	PT10S	200 s
+Blob read	PT30S	fixed	2	PT5S	100 s
+SB send internal	PT30S	exponential	4	PT2S–PT30S	240 s
+SB complete / abandon	PT20S	fixed	2	PT2S	46 s
+SB dead-letter	PT20S	fixed	3	PT3S	89 s
+SB renew lock	PT10S	fixed	2	PT1S	32 s
+11. Dead-letter queue operations
+11.1 Properties of the DLQ
+
+The DLQ is a sub-entity of its parent queue or subscription. Its messages count against the parent entity's size quota, so an unattended DLQ can eventually block the live path. DLQ messages do not themselves expire, and a DLQ has no DLQ of its own. Dead-lettering is therefore terminal within Service Bus; there is no further automatic safety net.
+
+11.2 Mandated operating model
+All ingress entity DLQs MUST set ForwardDeadLetteredMessagesTo = quarantine-central, giving a single triage surface.
+quarantine-central MUST NOT forward its own DLQ (self-forwarding is invalid); it is drained by wf-quarantine-processor.
+wf-quarantine-processor MUST, for every item: write the immutable evidence blob if not already present, create or update a case record, emit the SYSC 15A audit record with dataClassification, classify the item as replayable or non-replayable, and complete.
+Replay MUST be operator-initiated and dual-controlled. Automated blind replay of a DLQ is prohibited: it re-executes side effects against the market. Replay MUST re-emit onto the original work queue with the original correlationId and a replayOf property, and MUST be recorded as a change under SYSC 15A.
+DLQ residency SLA: triage within 4 business hours for submission and quotation flows; 1 business day for enrichment and telemetry flows.
+11.3 Reason code registry
+
+Reason codes MUST be drawn from a controlled registry held in the platform repository. Free-text reasons are prohibited. DeadLetterReason carries the code only; DeadLetterErrorDescription carries correlationId and blob URI only.
+
+SCHEMA_INVALID              BUSINESS_RULE_REJECTED      UNRECOGNISED_MESSAGE_TYPE
+PAYLOAD_NOT_FOUND           PAYLOAD_INTEGRITY_FAILURE   PAYLOAD_TOO_LARGE
+PARTNER_REJECTED_{status}   VALIDATION_REJECTED         CONTRACT_VIOLATION
+AUTH_FAILURE                AUTHZ_FAILURE               STATE_CONFLICT
+STORAGE_RBAC_FAILURE        STORAGE_CONTAINER_MISSING   STORAGE_REQUEST_INVALID
+STORAGE_VERSION_MISSING     IMMUTABILITY_CONFLICT       RESOURCE_GONE
+RETRY_BUDGET_EXHAUSTED      CIRCUIT_OPEN_EXPIRED        TTL_EXPIRED
+MAX_DELIVERY_EXCEEDED       AWAITING_PREREQUISITE_TIMEOUT
+LOCK_LOST                   RECONCILE_UNAVAILABLE       CAPABILITY_MISSING
+12. Observability and resilience evidencing
+12.1 Mandatory metrics
+Metric	Source	Alert threshold	Severity
+DLQ message count, per entity	Service Bus platform metric	> 0 sustained 15 min	P3; P2 for submission-outbound
+DLQ count, correlated across ≥ 2 subscriptions of one topic	Composite	Any	P2, page publisher
+quarantine-central depth	Platform metric	> 10, or any item aged > 4 h	P2
+LOCK_LOST rate	Custom, App Insights	> 1% of runs over 15 min	P2. Triggers lock budget re-validation.
+Abandon rate	Custom	> 5% of runs over 15 min	P3
+deliveryCount ≥ 3 occurrences	Custom	Any	P3
+Active message age (oldest message)	Platform metric	> 2 × expected processing latency	P2
+Scheduled retry queue depth	Platform metric	Growing over 30 min	P2
+Circuit breaker open duration	Custom	> 15 min	P2
+Trigger disabled state	Custom	Any, and on failure to re-enable	P1
+Zero messages received on external subscription	Custom, absence-of-signal	No message in expected window	P2. This is the filter-drift detector (§7.3) and the only alert that fires on silence.
+Partner 429 rate	Custom	> 2% over 15 min	P3, review concurrency
+Ambiguous outcome count	Custom	Any	P3, review reconciliation
+12.2 Correlation
+
+Every message MUST carry correlationId as an application property, propagated to: the HTTP X-Correlation-Id header on all downstream calls, the quarantine blob path, the audit record, the case record, and every App Insights custom dimension. Where a business identifier exists (UMR, submission reference), it MUST also be carried as a separate property. correlationId is a synthetic GUID and MUST NOT be derived from any personal identifier.
+
+Telemetry emission MUST use the fire-and-forget child workflow pattern so that telemetry failure never blocks or fails the processing chain, and MUST use an Application Insights connection string. Instrumentation-key-based ingestion has been retired and MUST NOT be used.
+
+12.3 SYSC 15A evidencing
+
+The following are the operational resilience artefacts this standard produces, and they MUST be retained per the firm's retention schedule:
+
+Immutable custody blob for every message received on an external entity.
+Structured audit record for every terminal lifecycle decision, including dataClassification.
+Lock budget worksheet per workflow, version-controlled, with review dates.
+Partner integration record capturing discovered external entity configuration (§7.1), reviewed quarterly.
+Trigger disable/enable actions logged as operational events.
+DLQ triage and replay records, dual-controlled.
+Impact tolerance mapping: for each in-scope workflow, the maximum tolerable processing delay before the business service is considered disrupted, and the alert that detects it.
+13. Security and data protection
+Dead-letter fields carry no personal data (P9). Reason code, correlation ID and blob URI only. This is a hard rule: DLQ contents sit outside run-history redaction, are visible to operators and tooling, and may persist indefinitely.
+secureData is mandatory on inputs and outputs for every action handling document bytes, submission payloads, tokens or partner credentials. Note that logging from within a compiled .NET custom function via ILogger bypasses run-history redaction; custom functions MUST NOT log payload content, and their logging MUST be reviewed as part of the same control.
+Data classification is per class of business. Submissions in EL, PA and PI lines routinely contain personal data and can contain special category data. The assumption that an RFQ payload is non-sensitive is not safe. Every in-scope workflow MUST set dataClassification on its audit record from an explicit classification of the entity's traffic, per INT-STD-003.
+Erasure. UK GDPR Art. 17 requests must be satisfiable. Quarantine and custody blobs are addressed by correlationId and indexed against business identifiers so that a subject's records are locatable. Where immutability policies prevent deletion, the retention justification MUST be recorded and the legal basis (regulatory record-keeping under SYSC 9) documented at design time, not at request time.
+Authentication. All Service Bus connections MUST use managed identity. Cross-tenant access to a partner namespace MUST use federated identity credentials where the partner supports it; SAS tokens are a fallback requiring Key Vault storage, a documented rotation schedule and a rotation failure alert.
+Network. Internal namespaces: Premium SKU, public network access disabled, private endpoints only. External namespace access egresses via the controlled path with amqpWebSockets transport where firewall policy requires port 443.
+Least privilege. Consuming workflows hold Azure Service Bus Data Receiver on the specific entity, not Data Owner at namespace scope. Sending workflows hold Data Sender on the specific target entity.
+14. Testing and assurance
+
+The following MUST be evidenced before an in-scope workflow reaches production.
+
+Layer	Requirement
+Unit	Lifecycle decision logic tested with the Microsoft.Azure.Workflows.UnitTesting SDK. Every row of the applicable decision matrix (§7.2, §7.3, §8.2) MUST have a corresponding test.
+Contract	Partner API response shapes, including every error status in §10.2.1, captured as WireMock.Net stub definitions or Pact contracts, with a scheduled drift check.
+Integration	Reqnroll + NUnit against a real, isolated Service Bus namespace. Run completion detected by Management API polling, never fixed sleeps.
+Lock budget validation	A load test at expected peak concurrency measuring P99 end-to-end run duration against the effective lock horizon. The lock budget worksheet MUST be signed off against measured P99, not estimated worst case, and re-run on any dependency change.
+Fault injection	Azure Chaos Studio or WireMock fault behaviours covering, at minimum: dependency 503 storm, 429 with Retry-After, connection reset mid-POST (ambiguous outcome), induced lock expiry, storage 403, and MaxDeliveryCount exhaustion. Each MUST demonstrate the correct terminal action and the correct audit record.
+DLQ and replay	End-to-end test of quarantine, triage, dual-controlled replay and idempotent reprocessing without duplicate side effects.
+Negative security	Unauthorised UMR, spoofed sender, oversized payload, executable masquerading as a document. Each MUST quarantine, not abandon.
+15. Governance
+
+Design review gate. No in-scope workflow may be merged to main without: the §3.2 inventory entry, the §9.3 lock budget worksheet, a completed failure-taxonomy mapping, and reason codes drawn from the registry.
+
+Exception process. Deviations from a MUST require a recorded exception containing: the rule deviated from, the business justification, the residual risk, the compensating control, an expiry date not exceeding 6 months, and Integration Architecture approval. Exceptions are reviewed at each architecture forum.
+
+Change triggers requiring re-validation of the lock budget: any change to a timeout or retry policy; any change to LockDuration, maxAutoLockRenewalDuration, concurrency or prefetch; any new action added to a critical path; any partner-notified change to their SLA or entity configuration; any extension bundle major version upgrade; any sustained rise in the LOCK_LOST metric.
+
+Appendix A — Expression reference
+jsonc
+// Peek-lock trigger outputs (built-in connector, bundle 1.81.x+)
+"@triggerBody()?['contentData']"                          // message body
+"@triggerBody()?['applicationProperties']?['correlationId']"
+"@triggerBody()?['userProperties']?['eventType']"
+"@triggerBody()?['messageId']"
+"@triggerBody()?['lockToken']"
+"@triggerBody()?['sequenceNumber']"
+"@triggerBody()?['deliveryCount']"
+"@triggerBody()?['enqueuedTimeUtc']"
+"@triggerBody()?['contentType']"
+"@triggerBody()?['sessionId']"
+
+// Remaining lock horizon (seconds) — gate before starting a long action
+"@sub(
+   parameters('effectiveLockHorizonSeconds'),
+   div(sub(ticks(utcNow()), ticks(workflow()['run']['startTime'])), 10000000)
+ )"
+
+// Abandon-vs-scheduled-retry decision (Rule I-1)
+"@and(
+   less(int(triggerBody()?['deliveryCount']), 3),
+   greater(variables('remainingLockSeconds'), 60)
+ )"
+
+// Exponential backoff with jitter, seconds
+"@add(
+   mul(30, pow(4, sub(int(coalesce(triggerBody()?['applicationProperties']?['attemptCount'],'1')), 1))),
+   rand(0, 30)
+ )"
+
+// Scheduled enqueue time
+"@addSeconds(utcNow(), variables('backoffSeconds'))"
+
+// Retryable status classification
+"@contains(createArray(408,425,429,500,502,503), int(outputs('Post_Quote_Partner')['statusCode']))"
+
+// Idempotent blob write success (Rule R-7)
+"@contains(createArray(201,409,412), int(outputs('Write_Custody_Blob')['statusCode']))"
+
+// TTL proximity check (Rule E-1 escalation)
+"@less(
+   sub(ticks(addSeconds(triggerBody()?['enqueuedTimeUtc'], parameters('entityTtlSeconds'))), ticks(utcNow())),
+   mul(2, mul(parameters('lockDurationSeconds'), 10000000))
+ )"
+
+Note on binary payloads. Where a message body is passed to a multipart or binary action, the reference MUST be a bare @body('action') with no interpolation braces. @{...} forces lossy string serialisation and corrupts binary content. The binary content envelope property is $content.
+
+Appendix B — Reference lifecycle scope skeleton
+jsonc
+{
+  "Try_Process": {
+    "type": "Scope",
+    "actions": { /* Gate 1: validate  →  Gate 2: custody  →  Gate 3: process */ }
+  },
+
+  "Catch_Classify": {
+    "type": "Scope",
+    "runAfter": { "Try_Process": [ "Failed", "Skipped", "TimedOut" ] },
+    "actions": {
+      "Determine_Failure_Class": { "type": "Compose", "inputs": { /* taxonomy §6 */ } },
+      "Write_Quarantine_Blob":   { "runAfter": { "Determine_Failure_Class": [ "Succeeded" ] } },
+      "Route": {
+        "type": "Switch",
+        "runAfter": { "Write_Quarantine_Blob": [ "Succeeded" ] },
+        "expression": "@outputs('Determine_Failure_Class')['class']",
+        "cases": {
+          "Permanent":  { "actions": { "DeadLetter_Message": {} } },   // or Quarantine+Complete if external
+          "Transient":  { "actions": { "Abandon_Or_Schedule": {} } },
+          "Dependency": { "actions": { "Defer_Or_Schedule": {} } },
+          "Ambiguous":  { "actions": { "Reconcile_Then_Decide": {} } }
+        },
+        "default": { "actions": { "DeadLetter_Unclassified": {} } }
+      }
+    }
+  },
+
+  "Complete_Message": {
+    "type": "ServiceProvider",
+    "runAfter": { "Try_Process": [ "Succeeded" ] },
+    "inputs": { /* lockToken */ },
+    "retryPolicy": { "type": "fixed", "count": 2, "interval": "PT2S" },
+    "limit": { "timeout": "PT20S" }
+  },
+
+  "Emit_Audit_Record": {
+    "type": "Workflow",
+    "runAfter": {
+      "Complete_Message": [ "Succeeded", "Failed", "Skipped", "TimedOut" ],
+      "Catch_Classify":   [ "Succeeded", "Failed", "Skipped", "TimedOut" ]
+    },
+    "operationOptions": "DisableAsyncPattern"   // fire-and-forget telemetry child
+  }
+}
+
+The runAfter on Catch_Classify covering Skipped and TimedOut alongside Failed is load-bearing (Rule R-10). A Skipped upstream action with an incomplete runAfter leaves the message unhandled, the lock expiring, and the delivery count silently incrementing.
+
+Appendix C — Review checklist
+
+Design review MUST confirm each of the following.
+
+Scope and inventory — workflow classified and added to inventory; trigger is peek-lock, not auto-complete; extension bundle ≥ 1.81.x with the newer peek-lock operations.
+
+Lifecycle — every failure path mapped to the taxonomy; decision matrix rows implemented; no unconditional else that completes; Quarantine + Complete used for all external sources unless Rule E-1 is satisfied and recorded; every dead-letter preceded by a custody blob write; reason codes from the registry only.
+
+Lock — profile selected; worksheet complete and within the 70% ceiling; prefetchCount = 0; maxMessageBatchSize = 1; autoCompleteMessages = false; concurrency load-tested against lock horizon.
+
+Retry — every action declares retryPolicy and limit.timeout; non-retryable statuses not retried; Retry-After honoured; APIM error source distinguished; MessageLockLost not retried; DisableAsyncPattern set on partner POSTs; ambiguous outcomes reconciled, not blind-retried.
+
+Idempotency — If-None-Match: * on blob writes and 409/412 treated as success; Idempotency-Key on partner POSTs; duplicate detection enabled on ingress entities.
+
+Security and data — managed identity throughout; secureData on all payload-touching actions; custom function logging reviewed; no personal data in dead-letter fields; dataClassification set; least-privilege RBAC at entity scope.
+
+Observability — correlation ID propagated end to end; all §12.1 alerts configured, including the zero-messages-received alert on every external subscription; telemetry fire-and-forget with connection string.
+
+Testing — decision matrix unit tests; contract stubs with drift check; fault injection for the six mandated scenarios; DLQ replay tested for idempotency; lock budget validated against measured P99.
+
+Appendix D — Verification notes for adopting teams
+
+Two items in this document are runtime-version-dependent and MUST be confirmed against your deployed extension bundle before the standard is applied, with findings fed back to Integration Architecture:
+
+Automatic lock renewal behaviour of the in-app connector. The extensions.serviceBus host settings are inherited from the Azure Functions Service Bus extension. Confirm empirically, on your bundle version, that maxAutoLockRenewalDuration is honoured for the peek-lock trigger you are using, by instrumenting a deliberately slow run and observing whether the lock survives past LockDuration. Where it is not honoured, the workflow MUST use explicit Renew lock actions on a timed loop at 50% of LockDuration, and the lock budget worksheet MUST be recalculated against LockDuration rather than the renewal duration.
+Exact operation names and output shapes of the 1.81.x peek-lock trigger and actions. Appendix A's expression paths reflect the current connector surface; confirm against the designer's generated JSON for your bundle and raise a documentation change if they differ.
+
+End of document. Change requests to Integration Architecture via the platform repository.
+
+To run code, enable code execution and file creation in Settings → Capabilities.
+
+Excellent content but need the final document output to be tighter, more concise and condensed further (keeping the most important bits!) to 5 to 8 pages, if possible. 
+
+Need it to be easy for other dev teams to go through and understand quickly what the guidance is, with helpful  summarised, illustrative tables, graphical representation, etc. its a bit too wordy and seems cumbersome to go through these 37 pages!  :-))
+
+Thought for 8s
+Service Bus Message Lifecycle & Retry Strategy
+
+Logic Apps Standard — Design Standard INT-STD-004 | v1.0 | Internal
+Owner: Integration Architecture · Review: 6-monthly or on extension bundle major version change
+Regulatory anchors: FCA SYSC 15A, UK GDPR Art. 5(1)(f)/17/32, SYSC 9
+
+1. The ten rules
+
+If you read nothing else, implement these.
+
+#	Rule
+R1	Thin receiver, fat processor. A locked message triggers validation, custody and handoff only. Slow work happens downstream on an internal queue.
+R2	Never lose custody. Write the raw message to immutable blob before any complete/abandon/dead-letter.
+R3	A partner's DLQ is not our storage. For external sources use Quarantine + Complete, not dead-letter.
+R4	Abandon is not a retry. It redelivers instantly with no backoff and burns MaxDeliveryCount in seconds. Use scheduled re-enqueue for backoff.
+R5	No implicit config. Every action declares retryPolicy and limit.timeout. "type":"none" is a valid declaration; absent is not.
+R6	Retries are subordinate to the lock. Worst-case critical path ≤ 70% of the effective lock horizon. If it doesn't fit, split the workflow (R1) — don't extend the lock.
+R7	At-least-once means idempotent. If-None-Match: * on blob writes; Idempotency-Key on partner POSTs.
+R8	Ambiguous ≠ failed. A timeout on a POST is unknown, not failed. Reconcile before retrying — a duplicate quote reaching the market is a conduct issue.
+R9	MessageLockLost is never retried. Fail the run and let redelivery + idempotency handle it.
+R10	No personal data in dead-letter fields. Reason code, correlation ID, blob URI only. DLQ sits outside run-history redaction.
+2. Scope: which workflows
+
+In full scope — trigger is any Service Bus peek-lock trigger (queue or topic subscription, internal or external).
+Partial scope (§7 retry only) — SB send, HTTP or Blob actions but a non-SB trigger.
+Out of scope — pure transform helpers with no external dependency.
+
+Auto-complete triggers are banned for placement, submission, quotation and document traffic. They acknowledge before the workflow body succeeds. Permitted only for loss-tolerant telemetry, with a recorded rationale.
+
+Each repo maintains docs/lifecycle-inventory.md:
+
+Workflow	Source	Entity	Downstream	Lock profile
+wf-ingest-rfq-partner	External	topic sub	Blob, SB send	A (partner-controlled lock)
+wf-ingest-document-partner	External	queue	HTTP (partner API), Blob, SB send	A (partner-controlled lock)
+wf-process-submission	Internal	queue	Blob, HTTP (Dataverse), .NET fn	B
+wf-submit-quote-partner	Internal	queue	Blob, HTTP POST (partner via APIM)	C
+wf-enrich-placement	Internal	topic sub	HTTP (D365), Blob	B
+wf-retry-scheduler	Internal	queue	SB send (scheduled)	A
+wf-quarantine-processor	Internal	queue	Blob (immutable), HTTP	B
+wf-error-handler / wf-telemetry-emit	—	—	—	Partial scope
+3. Lifecycle model
+   ┌─ Peek-lock trigger fires ─ lockToken acquired ─ lock clock starts ─┐
+   │                                                                    │
+   ▼
+ GATE 1  AUTHENTICITY          fail ──►  EXTERNAL: Quarantine + Complete
+ schema, contract, UMR                   INTERNAL: Dead-letter
+ authority, sender identity
+   │ pass
+   ▼
+ GATE 2  CUSTODY               fail ──►  ABANDON   (storage down = transient;
+ immutable blob write                              we must not complete without custody)
+ + audit record
+   │ pass
+   ▼
+ GATE 3  PROCESS               ┌── permanent ──►  Dead-letter / Quarantine
+ business logic,               ├── transient  ──►  Abandon (short) | Scheduled retry (long)
+ downstream calls              ├── dependency ──►  Defer | Scheduled retry
+   │ pass                      └── ambiguous  ──►  Reconcile ──► Complete | Scheduled retry
+   ▼
+ COMPLETE
+
+Gate order is mandatory. Custody precedes processing so no processing failure can produce a message we cannot reproduce.
+
+Failure taxonomy
+Class	Meaning	Action	Burns delivery count?
+Permanent	Identical reprocessing fails identically	Dead-letter / Quarantine	No
+Transient	May succeed unchanged	Abandon (short) or scheduled retry	Yes, on abandon
+Dependency-wait	Valid but arrived early	Defer or scheduled retry	No
+Ambiguous	Side effect may have occurred	Reconcile first	No
+4. External partner sources
+4.1 What you don't control
+
+LockDuration, MaxDeliveryCount, TTL, DLQ read access, entity lifetime. Discover and record these before go-live in the partner integration record; re-verify quarterly. If LockDuration is unobtainable, assume 30 seconds.
+
+4.2 Decision matrix — external queue and topic subscription
+Condition	Class	Action
+Unparseable body	Permanent	Quarantine + Complete
+Fails MRCv3 / CDR 3.0 / ACORD GRLC validation	Permanent	Quarantine + Complete → partner incident
+Unknown/unauthorised UMR, or sender not authorised	Permanent	Quarantine + Complete + SIEM event (never abandon — redelivery amplifies probing)
+Unrecognised message type (topic filter drift)	Permanent	Quarantine + Complete UNRECOGNISED_MESSAGE_TYPE
+Duplicate (messageId + payload hash seen)	Benign	Complete, dedup telemetry only
+Our blob storage down (Gate 2)	Transient	Abandon
+Blob storage down, abandons ≥ 2	Sustained	Abandon + circuit break (disable trigger)
+Partner API retryable, in-line retries exhausted	Transient	Abandon if deliveryCount < 3, else Quarantine + Complete
+Partner API non-retryable (400/403/404/410/422)	Permanent	Quarantine + Complete
+Internal SB send fails (custody handoff)	Transient	Abandon
+deliveryCount ≥ MaxDeliveryCount − 1	Escalation	Quarantine + Complete (pre-empt their auto-DLQ)
+TTL near expiry (< 2 × lock duration remaining)	Escalation	Quarantine + Complete
+
+Dead-letter on a partner entity is prohibited unless all three hold and are recorded: (a) partner contractually owns DLQ triage, (b) we hold read access on $DeadLetterQueue, (c) a monitored workflow drains it. Even then, quarantine first.
+
+4.3 Topic-specific traps
+Trap	Mitigation
+Filter evaluation exceptions dead-letter messages before we ever see them (SQL filters can throw; EnableDeadLetteringOnFilterEvaluationExceptions defaults true)	Prefer correlation filters — they cannot throw. If SQL is unavoidable, record the blind-spot and request a DLQ depth alert from the partner.
+Filter drift — partner changes Subject/eventType semantics; we silently stop matching	Mandatory "zero messages received" alert per external subscription. Silence is the failure mode.
+Unconditional else that completes unmatched messages	Prohibited. Route the default case to quarantine.
+4.4 Quarantine + Complete (the primary external pattern)
+1. Write raw message (body + all properties + messageId, sequenceNumber,
+   enqueuedTimeUtc, deliveryCount, source entity) to immutable blob:
+      quarantine/{yyyy}/{MM}/{dd}/{correlationId}.json
+      If-None-Match: *   ·   explicit x-ms-blob-content-type   ·   x-ms-version
+2. Send control message to internal 'quarantine-central':
+      correlationId, blobUri, reasonCode, sourceEntity,
+      dataClassification, originalMessageId, deliveryCount   — NO PAYLOAD
+3. Emit SYSC 15A audit record.
+4. Complete on the partner entity.        ← only if 1 AND 2 succeeded; else Abandon
+5. Internal sources
+5.1 Entity baseline (all internal placement/submission/document entities)
+Property	Value	Why
+MaxDeliveryCount	5 (not the default 10)	Scheduled retry does the backoff; a high count only delays detection
+DefaultMessageTimeToLive	7 days (14 for submission-outbound)	Must exceed longest credible outage + weekend
+EnableDeadLetteringOnMessageExpiration	true	Expiry must never be silent
+RequiresDuplicateDetection	true on ingress, ≥ 1 h window	Complements, doesn't replace, app-level idempotency
+ForwardDeadLetteredMessagesTo	quarantine-central on ingress entities	One triage surface
+RequiresSession	Only where per-UMR ordering is required	See §6.5
+SKU / network	Premium, public access disabled, private endpoints only	
+5.2 Decision matrix — internal queue and topic subscription
+Condition	Action	Reason code
+Malformed / schema violation	Dead-letter	SCHEMA_INVALID
+Business rejection (unknown A34 code, binding authority expired, UMR not in Dataverse)	Dead-letter	BUSINESS_RULE_REJECTED
+Referenced blob 404	Dead-letter	PAYLOAD_NOT_FOUND
+Blob present, hash mismatch	Dead-letter + security event	PAYLOAD_INTEGRITY_FAILURE
+Partner non-retryable (400/403/404/410/413/415/422)	Dead-letter	PARTNER_REJECTED_{status}
+Partner 409 with duplicate-accepted semantics	Complete	DUPLICATE_ACCEPTED
+Partner retryable, retries exhausted, deliveryCount < 3	Abandon	
+Partner retryable, deliveryCount ≥ 3	Complete + scheduled retry	DEFERRED_TO_RETRY_QUEUE
+Circuit breaker open	Complete + scheduled retry at half-open time	CIRCUIT_OPEN
+429 with Retry-After > remaining lock	Complete + scheduled retry at Retry-After	THROTTLED
+Blob write 5xx after retries	Abandon	
+Prerequisite missing	Defer (event-driven resume) or scheduled retry (time-driven)	AWAITING_PREREQUISITE
+MessageLockLost on any lifecycle action	Fail the run. No action.	LOCK_LOST
+Ambiguous → reconciled as succeeded	Complete	RECONCILED_SUCCESS
+Ambiguous → reconciliation unavailable	Complete + scheduled retry with idempotency key	RECONCILE_UNAVAILABLE
+
+Abandon budget: permitted only while deliveryCount < 3 and expected recovery < lock duration. This caps consumption at 3 of 5, leaving headroom for genuine infrastructure redelivery.
+
+Topic-specific: each subscription has its own DLQ, so a dead-letter here is not a global failure of the event. Correlated DLQ growth across ≥ 2 subscriptions of one topic pages the publisher, not each consumer.
+
+Sessions: a poison message blocks its whole session (head-of-line). On session-enabled entities, dead-letter permanent failures immediately — never abandon — so the UMR's session can advance.
+
+6. Locks
+6.1 Mechanics
+
+Max LockDuration is 5 minutes. Renewal resets the lock for a further full LockDuration; it does not accumulate, and it does not extend TTL or reset MaxDeliveryCount.
+
+Two renewal mechanisms exist. The in-app connector is service-provider based and inherits the Azure Functions Service Bus extension host settings, so host.json extensions.serviceBus governs maxAutoLockRenewalDuration, autoCompleteMessages, prefetchCount, maxConcurrentCalls, maxMessageBatchSize and clientRetryOptions. Separately, from bundle 1.81.x the connector ships peek-lock triggers and explicit complete / abandon / dead-letter / defer / renew-lock actions for queues and topic subscriptions; these removed the earlier client-SDK requirement for VNet integration and fixed instance counts, so peek-lock work can now start and finish on any instance in the pool.
+
+Target bundle ≥ 1.81.x and use the newer peek-lock operations. The older operations' instance affinity is incompatible with elastic scale-out and is a leading cause of LOCK_LOST.
+
+6.2 The nine variables that set your lock design
+	Variable	Effect
+V1	Worst-case critical path	Primary driver of the whole budget
+V2	Dependency location	In-network = low variance → fixed retry. External via APIM = long tails → exponential, and usually forces a workflow split
+V3	Payload size	Drives blob I/O and .NET function CPU (hashing, MIME inspection)
+V4	Concurrency	Excess runs queue in a waiting state; with a Service Bus trigger these must be tested so runs don't wait longer than the lock timeout
+V5	Prefetch	Lock clock starts at prefetch, not at processing — shortens usable horizon
+V6	Cold start / scale-out	Budget 20–30 s headroom on scale-from-zero profiles
+V7	Detection vs recovery	Long lock = slow redelivery after instance failure; short lock = more renewal race points
+V8	TTL	Renewal doesn't extend TTL — a repeatedly renewed message can still expire
+V9	Sessions	Session locks use sessionIdleTimeout / maxConcurrentSessions; session triggers long-poll, governed by clientRetryOptions:tryTimeout, while non-session triggers continuously poll
+6.3 Lock profiles (internal entities)
+Profile	LockDuration	maxAutoLockRenewalDuration	Use for
+A — Thin receiver	60 s	00:02:00	Validate → blob → emit → complete. Default for all new ingress.
+B — Standard processor	300 s	00:10:00	Internal-only downstream (Dataverse, D365 via internal APIM)
+C — External-facing	300 s	00:15:00	Outbound submission to PPL / Transcriber. Requires approved budget worksheet.
+D — Long-running	Not permitted	—	> 15 min worst case → restructure under R1
+6.4 The 70% rule and the budget worksheet
+WorstCase(action) = (RetryCount + 1) × Timeout + Σ RetryIntervals
+Critical path      = Σ WorstCase on longest branch + 20 s orchestration overhead
+MUST satisfy:      Critical path ≤ 0.70 × EffectiveLockHorizon
+
+EffectiveLockHorizon = maxAutoLockRenewalDuration if auto-renew is confirmed working, else LockDuration. The 30% reserve absorbs cold start (V6), waiting-run latency (V4) and renewal jitter.
+
+Every in-scope workflow carries this in its repo, re-validated on any timeout/retry/concurrency change:
+
+wf-submit-quote-partner   ·  Profile C  ·  Horizon 900 s  ·  70% ceiling = 630 s
+
+  Action                       Timeout  Retries  Interval      Worst case
+  ──────────────────────────────────────────────────────────────────────
+  Read_Submission_Blob         PT30S    2 fixed  PT5S             100 s
+  Get_Partner_Token (APIM)     PT15S    2 fixed  PT3S              51 s
+  Post_Quote_Partner (APIM)    PT45S    3 expo   PT10S–PT60S      250 s
+  Write_Audit_Blob             PT30S    2 fixed  PT5S             100 s
+  Send_Internal_Confirmation   PT20S    2 fixed  PT5S              70 s
+  Complete_Message             PT20S    1 fixed  PT2S              42 s
+  Orchestration overhead                                           20 s
+  ──────────────────────────────────────────────────────────────────────
+  TOTAL                                                           633 s  ✗ BREACH
+
+  Fix: Post_Quote_Partner → 2 retries (195 s)  ⇒  578 s ✓ (92% of ceiling)
+
+That breach is the common failure: two individually reasonable retry policies that together blow the budget. This is why R5 and the worksheet exist. Sign off against measured P99 from a peak-concurrency load test, not estimates.
+
+6.5 host.json baseline
+jsonc
+{
+  "version": "2.0",
+  "extensionBundle": { "id": "Microsoft.Azure.Functions.ExtensionBundle.Workflows",
+                       "version": "[1.81.0, 2.0.0)" },
+  "extensions": {
+    "serviceBus": {
+      "autoCompleteMessages": false,        // MANDATORY — lifecycle is explicit
+      "maxAutoLockRenewalDuration": "00:10:00",
+      "prefetchCount": 0,                   // MANDATORY — prefetch starts the lock clock early (V5)
+      "maxMessageBatchSize": 1,             // MANDATORY — batching couples unrelated lock horizons
+      "maxConcurrentCalls": 8,
+      "maxConcurrentSessions": 4,
+      "sessionIdleTimeout": "00:01:00",
+      "transportType": "amqpWebSockets",
+      "clientRetryOptions": {               // broker comms only — does NOT retry workflow actions
+        "mode": "exponential", "tryTimeout": "00:00:30",
+        "delay": "00:00:00.80", "maxDelay": "00:00:20", "maxRetries": 3
+      }
+    }
+  },
+  "workflow": { "settings": { "Runtime.Trigger.MaximumWaitingRuns": "10" } }
+}
+
+Keep clientRetryOptions.maxDelay well below LockDuration so broker-level retries can't consume the lock.
+
+6.6 Scheduled retry — the only sanctioned backoff
+
+When the outage exceeds the lock horizon, move the message out of the lock:
+
+1. Compute next attempt from application property 'attemptCount'
+2. Send to 'retry-scheduled' with ScheduledEnqueueTimeUtc, attemptCount+1,
+   correlationId, quarantine blobUri, target descriptor
+3. Complete the original message
+Attempt	1	2	3	4	5	6	7	8
+Delay (±20% jitter)	30 s	2 m	8 m	30 m	2 h	6 h	12 h	Stop
+
+Attempt 8 → dead-letter to quarantine-central, RETRY_BUDGET_EXHAUSTED, P2 incident. Validate the computed time falls inside TTL. For submissions with a market deadline, truncate at deadline − 1 h and escalate to manual — retrying past business value is noise.
+
+Circuit breaker: 5 consecutive terminal failures in 2 min → open 5 min → half-open probe. While open, take the scheduled-retry path. Open > 15 min → runbook disables the trigger (a logged SYSC 15A operational action) to stop burning delivery counts.
+
+7. Retry strategy
+7.1 HTTP status taxonomy
+Status	Class	In-line retry?	Terminal action
+2xx	Success	—	Complete
+400, 405, 406, 415, 501	Permanent	No	Dead-letter CONTRACT_VIOLATION / PARTNER_REJECTED_400
+401	Conditional	One token refresh + one retry	Dead-letter AUTH_FAILURE
+403	Permanent	No	Dead-letter + security event AUTHZ_FAILURE
+404, 410	Permanent	No	Dead-letter RESOURCE_NOT_FOUND / RESOURCE_GONE
+409	Context-dependent	No	Idempotency-key match → Complete DUPLICATE_ACCEPTED. Genuine conflict → Dead-letter. Confirm which semantics your partner uses and document it.
+413	Permanent	No	Dead-letter PAYLOAD_TOO_LARGE
+422	Permanent	No	Dead-letter VALIDATION_REJECTED (capture redacted detail to quarantine)
+408, 425, 500, 502	Transient	Yes	Scheduled retry
+429	Transient (governed)	Only if Retry-After ≤ remaining lock	Else Complete + scheduled retry at Retry-After
+503	Transient	Yes, honour Retry-After	Scheduled retry + circuit signal
+504	Ambiguous	No blind retry	Reconcile (§7.4)
+No response / conn. reset	GET: transient · POST/PUT/PATCH: ambiguous	GET yes, POST no	Reconcile
+
+Honouring Retry-After is mandatory. Ignoring it amplifies congestion and escalates partner rate-limiting.
+
+7.2 Configuration by target location
+Target class	Timeout	Type	Count	Interval	Worst case
+Internal, low-latency (Dataverse/D365, internal APIM, PE)	PT20S	fixed	2	PT5S	70 s
+Internal, heavy (docs, .NET fn, Databricks)	PT45S	fixed	2	PT10S	155 s
+External partner, sync (PPL, Transcriber)	PT45S	exponential	3	PT10S–PT60S	250 s
+External token endpoint	PT15S	fixed	2	PT3S	51 s
+External document download	PT60S	exponential	2	PT10S–PT30S	220 s
+External, unknown SLA	PT30S	none	0	—	30 s
+Blob write ≤ 4 MB / read	PT30S	fixed	2	PT5S	100 s
+Blob write > 4 MB	PT60S	fixed	2	PT10S	200 s
+SB send (internal)	PT30S	exponential	4	PT2S–PT30S	240 s
+SB complete / abandon	PT20S	fixed	2	PT2S	46 s
+SB dead-letter	PT20S	fixed	3	PT3S	89 s
+SB renew lock	PT10S	fixed	2	PT1S	32 s
+
+Why fixed for in-network: latency variance is low, so exponential backoff buys nothing and eats budget the external call needs. External in-line retries: max 3, and ≤ 40% of the lock horizon on their own.
+
+APIM rules. (a) Distinguish APIM-generated errors from backend errors — an APIM IP-filter 403 is infrastructure, not a partner rejection, and misclassifying it dead-letters valid submissions. Surface X-Gateway-Error-Source: apim|backend in the product policy and branch on it. (b) Set APIM's forward-request timeout shorter than the action's limit.timeout, so you get a structured 504 rather than an abandoned connection (which is ambiguous).
+
+7.3 Blob Storage specifics
+
+Use the Storage REST API with managed identity, not the built-in connector (no content-type control). Always send x-ms-version — omitting it causes fallback to a pre-OAuth service version and a 403 that looks like an RBAC fault.
+
+Result	Treat as
+409 BlobAlreadyExists / 412 ConditionNotMet with If-None-Match: *	SUCCESS (idempotent redelivery). Dead-lettering here loses valid messages.
+403 missing x-ms-version / 400 InvalidHeaderValue	Permanent code defect → dead-letter + page owning team
+403 AuthorizationPermissionMismatch, 404 ContainerNotFound	Permanent config → dead-letter + P2
+409 BlobImmutableDueToPolicy / legal hold	Permanent — never retry, it can never succeed
+412 on If-Match (optimistic concurrency)	Transient contention → re-read, retry ×3 jittered
+429, 500 OperationTimedOut, 503 ServerBusy	Transient → backoff
+7.4 Ambiguous outcome reconciliation
+Timeout / connection reset on a side-effecting call
+   ├─ Conditional blob write?  → re-read blob; present + MD5 match = success
+   ├─ Partner exposes status/lookup? → GET by Idempotency-Key or submission ref
+   └─ No reconciliation available?
+         → record as accepted residual risk in the design note
+         → POST MUST carry Idempotency-Key
+         → retry only via scheduled queue, minimum 30 s delay
+         → raise as a control gap with the partner
+7.5 Service Bus action specifics
+Failure	Policy	Why
+MessageLockLost on complete / abandon / dead-letter	none	The lock is gone; retry cannot succeed. Fail the run — the broker redelivers and idempotency makes it harmless.
+Transient on complete/abandon	fixed ×2, PT2S	Runs at the end of the budget with least headroom — keep it small
+Transient on dead-letter	fixed ×3, PT3S	Slightly more generous: failing to dead-letter loops to MaxDeliveryCount
+Renew lock	fixed ×2, PT1S	Racing lock expiry. Attempt renewal at 50% of LockDuration elapsed.
+Send MessageSizeExceeded	none	Permanent → claim-check to blob, dead-letter source
+Send QuotaExceeded (entity full)	expo ×3, PT10S–PT60S	Transient but signals a downstream consumer outage → P2 on first occurrence
+Send ServerBusy	expo ×4, PT2S–PT30S	Namespace throttling responds well to backoff
+Send UnauthorizedAccess	none	Config/RBAC → P2
+
+runAfter completeness is the most common review defect. Lifecycle scopes must cover Succeeded, Failed, Skipped and TimedOut. A Skipped upstream action with incomplete wiring leaves the message neither completed nor abandoned — the lock expires, delivery count increments, and nobody notices.
+
+8. DLQ operations
+
+The DLQ counts against the parent entity's size quota, its messages do not expire, and it has no DLQ of its own. Dead-lettering is terminal within Service Bus.
+
+All ingress DLQs forward to quarantine-central (which cannot forward to itself; it is drained by wf-quarantine-processor).
+Processor per item: evidence blob → case record → SYSC 15A audit record with dataClassification → classify replayable → complete.
+Replay is operator-initiated and dual-controlled. Automated blind replay is prohibited — it re-executes side effects against the market. Replay re-emits with the original correlationId plus a replayOf property, logged as a change.
+SLA: 4 business hours for submission/quotation; 1 business day for enrichment.
+Reason codes come from the controlled registry only. Free text prohibited.
+9. Observability
+Metric	Threshold	Sev
+DLQ count per entity	> 0 sustained 15 min	P3 (P2 for submission-outbound)
+DLQ growth correlated across ≥ 2 subs of one topic	any	P2 — page the publisher
+quarantine-central depth	> 10, or any item aged > 4 h	P2
+LOCK_LOST rate	> 1% of runs / 15 min	P2 — triggers lock budget re-validation
+Abandon rate	> 5% / 15 min	P3
+deliveryCount ≥ 3	any	P3
+Oldest active message age	> 2 × expected latency	P2
+Scheduled retry queue depth	growing over 30 min	P2
+Circuit breaker open	> 15 min	P2
+Trigger disabled / failed to re-enable	any	P1
+Zero messages on external subscription	no message in expected window	P2 — the filter-drift detector
+
+A rising LOCK_LOST rate is the leading indicator that a lock budget has gone stale because a dependency's latency profile shifted. Treat it as a resilience metric, not a bug count.
+
+correlationId (synthetic GUID, never derived from a personal identifier) propagates to every downstream X-Correlation-Id header, quarantine blob path, audit record and App Insights dimension. Telemetry uses the fire-and-forget child workflow pattern with an App Insights connection string — instrumentation-key ingestion is retired.
+
+10. Security & data protection
+No personal data in DeadLetterReason / DeadLetterErrorDescription. These sit outside run-history redaction, are operator-visible and persist indefinitely.
+secureData on inputs and outputs for every action touching document bytes, payloads or tokens. ILogger inside compiled .NET functions bypasses run-history redaction — custom functions must not log payload content.
+Classify per class of business. EL, PA and PI submissions routinely carry personal and sometimes special category data. "RFQ payloads aren't sensitive" is not a safe assumption. Set dataClassification on every audit record.
+Erasure (Art. 17): custody and quarantine blobs are addressable by correlationId and indexed to business identifiers. Where immutability blocks deletion, record the SYSC 9 retention basis at design time.
+Managed identity throughout; federated identity for cross-tenant partner namespaces (SAS only as fallback, Key Vault + rotation alert). Least privilege at entity scope (Data Receiver / Data Sender), never namespace Data Owner.
+SuppressWorkflowHeaders on partner calls so x-ms-workflow-* run identifiers don't leak.
+11. Review checklist
+
+Scope ☐ inventory entry ☐ peek-lock, not auto-complete ☐ bundle ≥ 1.81.x with new peek-lock ops
+
+Lifecycle ☐ every failure path mapped to the taxonomy ☐ matrix rows implemented ☐ no unconditional completing else ☐ Quarantine + Complete for external ☐ custody blob before every dead-letter ☐ registry reason codes only
+
+Lock ☐ profile chosen ☐ worksheet ≤ 70% ceiling ☐ prefetchCount 0 ☐ maxMessageBatchSize 1 ☐ autoCompleteMessages false ☐ P99 measured under peak concurrency
+
+Retry ☐ every action declares policy + timeout ☐ non-retryable statuses not retried ☐ Retry-After honoured ☐ APIM error source distinguished ☐ MessageLockLost never retried ☐ DisableAsyncPattern on partner POSTs ☐ ambiguous outcomes reconciled ☐ runAfter covers Succeeded/Failed/Skipped/TimedOut
+
+Idempotency ☐ If-None-Match: * and 409/412 = success ☐ Idempotency-Key on POSTs ☐ duplicate detection on ingress
+
+Security ☐ managed identity ☐ secureData ☐ custom-function logging reviewed ☐ no PII in DLQ fields ☐ dataClassification set ☐ entity-scoped RBAC
+
+Testing ☐ decision-matrix unit tests (Workflows UnitTesting SDK) ☐ WireMock/Pact contract stubs + drift check ☐ fault injection: 503 storm, 429 with Retry-After, mid-POST reset, induced lock expiry, storage 403, delivery-count exhaustion ☐ DLQ replay idempotency ☐ negative security (unauthorised UMR, executable masquerade)
+
+Appendix A — Expressions
+jsonc
+// Trigger outputs (in-app peek-lock, 1.81.x+)
+"@triggerBody()?['contentData']"
+"@triggerBody()?['applicationProperties']?['correlationId']"
+"@triggerBody()?['lockToken']"        "@triggerBody()?['deliveryCount']"
+"@triggerBody()?['sequenceNumber']"   "@triggerBody()?['enqueuedTimeUtc']"
+
+// Remaining lock horizon, seconds — gate before starting a long action
+"@sub(parameters('effectiveLockHorizonSeconds'),
+      div(sub(ticks(utcNow()), ticks(workflow()['run']['startTime'])), 10000000))"
+
+// Abandon vs scheduled retry
+"@and(less(int(triggerBody()?['deliveryCount']), 3),
+      greater(variables('remainingLockSeconds'), 60))"
+
+// Exponential backoff with jitter (seconds)
+"@add(mul(30, pow(4, sub(int(coalesce(
+   triggerBody()?['applicationProperties']?['attemptCount'],'1')), 1))), rand(0,30))"
+
+// Retryable HTTP
+"@contains(createArray(408,425,429,500,502,503), int(outputs('Post_Quote')['statusCode']))"
+
+// Idempotent blob write success
+"@contains(createArray(201,409,412), int(outputs('Write_Custody_Blob')['statusCode']))"
+
+Binary payloads: pass as bare @body('action') with no @{...} braces — interpolation forces lossy string serialisation and corrupts binary content. The binary envelope property is $content.
+
+Appendix B — Lifecycle scope skeleton
+jsonc
+"Try_Process":   { "type": "Scope", "actions": { /* Gate1 → Gate2 → Gate3 */ } },
+
+"Catch_Classify": {
+  "type": "Scope",
+  "runAfter": { "Try_Process": ["Failed","Skipped","TimedOut"] },   // all three — see §7.5
+  "actions": {
+    "Determine_Failure_Class": { "type": "Compose" },
+    "Write_Quarantine_Blob":   { "runAfter": { "Determine_Failure_Class": ["Succeeded"] } },
+    "Route": {
+      "type": "Switch",
+      "runAfter": { "Write_Quarantine_Blob": ["Succeeded"] },
+      "expression": "@outputs('Determine_Failure_Class')['class']",
+      "cases": {
+        "Permanent":  { "actions": { "DeadLetter_Or_QuarantineComplete": {} } },
+        "Transient":  { "actions": { "Abandon_Or_Schedule": {} } },
+        "Dependency": { "actions": { "Defer_Or_Schedule": {} } },
+        "Ambiguous":  { "actions": { "Reconcile_Then_Decide": {} } }
+      },
+      "default": { "actions": { "DeadLetter_Unclassified": {} } }   // never complete silently
+    }
+  }
+},
+
+"Complete_Message": {
+  "runAfter": { "Try_Process": ["Succeeded"] },
+  "retryPolicy": { "type": "fixed", "count": 2, "interval": "PT2S" },
+  "limit": { "timeout": "PT20S" }
+},
+
+"Emit_Audit_Record": {                                   // fire-and-forget child
+  "type": "Workflow",
+  "runAfter": { "Complete_Message": ["Succeeded","Failed","Skipped","TimedOut"],
+                "Catch_Classify":   ["Succeeded","Failed","Skipped","TimedOut"] },
+  "operationOptions": "DisableAsyncPattern"
+}
+Appendix C — Verify before adopting
+
+Two items are runtime-version-dependent. Confirm on your bundle and feed findings back to Integration Architecture.
+
+Auto-renew actually works. The extensions.serviceBus settings are inherited from the Functions extension. Prove empirically, with a deliberately slow run, that maxAutoLockRenewalDuration is honoured for your peek-lock trigger. If it isn't, use explicit Renew lock actions at 50% of LockDuration and recalculate the budget against LockDuration, not the renewal duration.
+Exact 1.81.x operation names and output shapes. Appendix A reflects the current surface; check the designer-generated JSON for your bundle.
+
+Governance: deviations from a rule require a recorded exception (rule, justification, residual risk, compensating control, ≤ 6-month expiry, Architecture approval). Re-validate the lock budget on any change to timeouts, retries, LockDuration, concurrency, prefetch, critical-path actions, partner SLA, bundle major version, or a rising LOCK_LOST trend.
+
+End of document — INT-STD-004 v1.0
