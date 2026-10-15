@@ -1,0 +1,10 @@
+Network Topology
+A secure-by-design   approach is taken to apply a default data classification of Sensitive to all risk documents as they may contain sensitive personal and client/company information. 
+
+As a result, the Logic App resource will be VNET-integrated and live in a subnet. As the application will not contain any internet facing HTTP endpoints (whether directly or via an APIM API operation), its subnet should block all inbound HTTP requests from the internet (outside the Apollo network).
+
+There will, however, be 2x internal HTTP-triggered Logic App workflows that can be used by internal Apollo IT support team, via Postman to trigger a manual (for a specific risk or UMR) or backfill document import orchestration 
+
+The 2x Storage Accounts   will live in their own subnet as they will be custodians of data and files/blobs that may contain confidential or sensitive client information.
+
+The Logic App will communicate with the other Azure services in this solution (e.g. data and config Storage Accounts) over a private network (via private endpoints).
