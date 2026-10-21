@@ -1,0 +1,231 @@
+name: CD - IaC - Bicep (DTS)
+
+# Triggered automatically when CI - IaC - Bicep passes on develop (dev stage) or main.
+# Each stage runs What-If before deploying so approvers can review infra changes.
+# UAT and prod stages require manual approval via ADO Environments.
+#
+# Azure DevOps portal setup (one-time):
+#   Environments > uat  > Approvals: 1 approver required
+#   Environments > prod > Approvals: min 2 approvers, requester cannot self-approve, timeout 4 h
+#   Service connections (Workload Identity Federation, name = app registration):
+#     DevOps-DTS-CoreTech-IaC-Dev
+#     DevOps-DTS-CoreTech-IaC-UAT
+#     DevOps-DTS-CoreTech-IaC-Prod
+#   Each service connection WIF app reg needs Contributor on TWO resource groups:
+#     - DTS Logic App RG          (value of RESOURCE_GROUP variable below)
+#     - Integration platform RG   (value of SHARED_RESOURCE_GROUP variable below)
+#   The Bicep deployment targets the DTS RG but deploys Service Bus topics,
+#   KV secrets, and alert rules into the shared integration platform RG via
+#   cross-RG module scoping — so the identity must have access to both.
+#   Variable groups (Library):
+#     vg-dts-dev-uks  — RESOURCE_GROUP, SHARED_RESOURCE_GROUP, KEY_VAULT_NAME,
+#                       SERVICE_BUS_NAMESPACE, APIM_BASE_URL, APP_INSIGHTS_NAME
+#     vg-dts-uat-uks  — (same variables)
+#     vg-dts-prod-uks — (same variables)
+
+parameters:
+  - name: deployTo
+    displayName: 'Deploy to environments'
+    type: string
+    default: dev-uat
+    values: [dev, dev-uat, all]
+
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+    - pipeline: ci_iac_bicep
+      source: 'DTS_CI_CD\dts_ci_bicep_iac_pipeline'
+      trigger:
+        branches:
+          include: [develop, main]
+
+pool:
+  name: 'Azure Pipelines'
+  vmImage: 'windows-latest'
+
+stages:
+
+  # ── DEV ──────────────────────────────────────────────────────────────────────
+  - stage: DeployDev
+    displayName: 'IaC Deploy DEV'
+    variables:
+      - group: vg-dts-dev-uks
+    jobs:
+      - deployment: BicepDeploy
+        displayName: 'What-If + Deploy (dev)'
+        environment: dts-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - powershell: az bicep install
+                  displayName: 'Install Bicep CLI'
+
+                - task: AzureCLI@2
+                  displayName: 'Bicep What-If (dev)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-CoreTech-IaC-Dev'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/iac-whatif.ps1
+                    arguments: >-
+                      -ResourceGroup $(RESOURCE_GROUP)
+                      -TemplateFile infra/bicep/main.bicep
+                      -ParamsFile infra/bicep/dev.parameters.bicepparam
+                      -SharedResourceGroup $(SHARED_RESOURCE_GROUP)
+                      -ServiceBusNamespace $(SERVICE_BUS_NAMESPACE)
+                      -ApimBaseUrl $(APIM_BASE_URL)
+                      -AppInsightsName $(APP_INSIGHTS_NAME)
+                      -KeyVaultName $(KEY_VAULT_NAME)
+
+                - task: AzureCLI@2
+                  displayName: 'Bicep Deploy (dev)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-CoreTech-IaC-Dev'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/iac-deploy.ps1
+                    arguments: >-
+                      -ResourceGroup $(RESOURCE_GROUP)
+                      -TemplateFile infra/bicep/main.bicep
+                      -ParamsFile infra/bicep/dev.parameters.bicepparam
+                      -DeploymentNamePrefix dts-bicep-dev
+                      -SharedResourceGroup $(SHARED_RESOURCE_GROUP)
+                      -ServiceBusNamespace $(SERVICE_BUS_NAMESPACE)
+                      -ApimBaseUrl $(APIM_BASE_URL)
+                      -AppInsightsName $(APP_INSIGHTS_NAME)
+                      -KeyVaultName $(KEY_VAULT_NAME)
+
+  # ── UAT ──────────────────────────────────────────────────────────────────────
+  - stage: DeployUat
+    displayName: 'IaC Deploy UAT'
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      - group: vg-dts-uat-uks
+    jobs:
+      - deployment: BicepDeploy
+        displayName: 'What-If + Deploy (uat)'
+        environment: dts-uat
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - powershell: az bicep install
+                  displayName: 'Install Bicep CLI'
+
+                - task: AzureCLI@2
+                  displayName: 'Bicep What-If (uat)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-CoreTech-IaC-UAT'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/iac-whatif.ps1
+                    arguments: >-
+                      -ResourceGroup $(RESOURCE_GROUP)
+                      -TemplateFile infra/bicep/main.bicep
+                      -ParamsFile infra/bicep/uat.parameters.bicepparam
+                      -SharedResourceGroup $(SHARED_RESOURCE_GROUP)
+                      -ServiceBusNamespace $(SERVICE_BUS_NAMESPACE)
+                      -ApimBaseUrl $(APIM_BASE_URL)
+                      -AppInsightsName $(APP_INSIGHTS_NAME)
+                      -KeyVaultName $(KEY_VAULT_NAME)
+
+                - task: AzureCLI@2
+                  displayName: 'Bicep Deploy (uat)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-CoreTech-IaC-UAT'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/iac-deploy.ps1
+                    arguments: >-
+                      -ResourceGroup $(RESOURCE_GROUP)
+                      -TemplateFile infra/bicep/main.bicep
+                      -ParamsFile infra/bicep/uat.parameters.bicepparam
+                      -DeploymentNamePrefix dts-bicep-uat
+                      -SharedResourceGroup $(SHARED_RESOURCE_GROUP)
+                      -ServiceBusNamespace $(SERVICE_BUS_NAMESPACE)
+                      -ApimBaseUrl $(APIM_BASE_URL)
+                      -AppInsightsName $(APP_INSIGHTS_NAME)
+                      -KeyVaultName $(KEY_VAULT_NAME)
+
+  # ── PROD ─────────────────────────────────────────────────────────────────────
+  - ${{ if eq(parameters.deployTo, 'all') }}:
+    - stage: DeployProd
+      displayName: 'IaC Deploy PROD'
+      dependsOn: DeployUat
+      variables:
+        - group: vg-dts-prod-uks
+      jobs:
+        - job: DeploymentWindowCheck
+          displayName: 'Deployment window check (Mon-Thu 09:00-16:00 UTC)'
+          steps:
+            - powershell: |
+                $now  = [System.DateTime]::UtcNow
+                $day  = $now.DayOfWeek
+                $hour = $now.Hour
+                Write-Host "  UTC now : $($now.ToString('yyyy-MM-dd HH:mm')) ($day)"
+                if ($day -in @('Friday','Saturday','Sunday')) {
+                  Write-Host "##[error]Production deployments are not permitted on Fri/Sat/Sun"
+                  exit 1
+                }
+                if ($hour -lt 9 -or $hour -ge 16) {
+                  Write-Host "##[error]Production deployments are only permitted 09:00-16:00 UTC"
+                  exit 1
+                }
+                Write-Host "  Deployment window check passed"
+              displayName: 'Check deployment window'
+
+        - deployment: BicepDeploy
+          displayName: 'What-If + Deploy (prod — requires 2 approvals)'
+          dependsOn: DeploymentWindowCheck
+          environment: dts-prod
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+
+                  - powershell: az bicep install
+                    displayName: 'Install Bicep CLI'
+
+                  - task: AzureCLI@2
+                    displayName: 'Bicep What-If (prod)'
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-CoreTech-IaC-Prod'
+                      scriptType: ps
+                      scriptLocation: scriptPath
+                      scriptPath: pipelines/scripts/iac-whatif.ps1
+                      arguments: >-
+                        -ResourceGroup $(RESOURCE_GROUP)
+                        -TemplateFile infra/bicep/main.bicep
+                        -ParamsFile infra/bicep/prod.parameters.bicepparam
+                        -SharedResourceGroup $(SHARED_RESOURCE_GROUP)
+                        -ServiceBusNamespace $(SERVICE_BUS_NAMESPACE)
+                        -ApimBaseUrl $(APIM_BASE_URL)
+                        -AppInsightsName $(APP_INSIGHTS_NAME)
+                        -KeyVaultName $(KEY_VAULT_NAME)
+
+                  - task: AzureCLI@2
+                    displayName: 'Bicep Deploy (prod)'
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-CoreTech-IaC-Prod'
+                      scriptType: ps
+                      scriptLocation: scriptPath
+                      scriptPath: pipelines/scripts/iac-deploy.ps1
+                      arguments: >-
+                        -ResourceGroup $(RESOURCE_GROUP)
+                        -TemplateFile infra/bicep/main.bicep
+                        -ParamsFile infra/bicep/prod.parameters.bicepparam
+                        -DeploymentNamePrefix dts-bicep-prod
+                        -SharedResourceGroup $(SHARED_RESOURCE_GROUP)
+                        -ServiceBusNamespace $(SERVICE_BUS_NAMESPACE)
+                        -ApimBaseUrl $(APIM_BASE_URL)
+                        -AppInsightsName $(APP_INSIGHTS_NAME)
+                        -KeyVaultName $(KEY_VAULT_NAME)
