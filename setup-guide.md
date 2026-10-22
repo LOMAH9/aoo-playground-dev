@@ -17,21 +17,23 @@ This guide walks through provisioning DTS from scratch. Complete each numbered s
 | Logic App Standard | `logic-{loc}-dts-{env}` |
 | Config storage account | `sta{loc}dtsconfig{env}` |
 | Data storage account | `sta{loc}dtsdata{env}` (blob containers + all 10 Azure Tables) |
-| Service Bus delivery topic + sub | `sbt-dts-riskdocs-delivery` / `sbts-dts-riskdocs-delivery` |
-| Service Bus notification topic + sub | `sbt-dts-riskdocs-notifications` / `sbts-dts-riskdocs-notifications` |
-| RBAC role assignments | Blob + Table Contributor on data account; Service Bus Data roles; KV Secrets User on shared KV |
+| Service Bus discovery + delivery + notification topics and subscriptions | in `rg-uks-integrationplatform-{env}` |
 | Diagnostic settings | Logic App logs → shared Log Analytics workspace |
 
 > `{loc}` = `uks` for UK South, `ukw` for UK West. `{env}` = `dev`, `uat`, or `prod`.
 
-**What you do manually:**
+**What is provisioned manually (outside this pipeline):**
 
-- Configure Azure DevOps (step 0) — one-time; covers repo, branches, WIF, service connections, environments, pipelines
-- Create resource groups
-- Populate Key Vault secrets (step 2)
-- Create the SharePoint managed API connection in the Azure Portal (step 5)
-- Seed Azure Table Storage with workload and routing configuration (step 7)
-- Deploy Logic App workflows (step 4)
+| Task | Owner |
+|---|---|
+| VNet, subnets, NSGs, private endpoints | Infrastructure team |
+| RBAC role assignments for the Logic App MI | App Support / Infrastructure team — notify once assigned |
+| Azure DevOps setup (step 0) | You — one-time |
+| Resource groups | You |
+| Key Vault secrets (step 2) | You |
+| SharePoint managed API connection (step 5) | You |
+| Azure Table Storage seed data (step 7) | You |
+| Logic App workflow deployment (step 4) | You / CD pipeline |
 
 ---
 
@@ -39,8 +41,8 @@ This guide walks through provisioning DTS from scratch. Complete each numbered s
 
 | Requirement | Detail |
 |---|---|
-| Azure subscription | `Contributor` (or custom equivalent) on `rg-uks-dts-{env}` |
-| Shared integration platform | `rg-uks-integration-{env}` must already exist and contain: `kv-uks-integration-{env}`, `sbns-uks-integrationplatform-{env}`, `apim-uks-integrationplatform-{env}`, `appi-uks-integrationplatform-{env}` |
+| Azure subscription | `Contributor` on `rg-uks-dts-{env}` |
+| Shared integration platform | `rg-uks-integrationplatform-{env}` must already exist and contain: `kv-uks-integration-{env}`, `sbns-uks-integrationplatform-{env}`, `apim-uks-integrationplatform-{env}`, `appi-uks-integrationplatform-{env}` |
 | KV write access | Your identity needs `Key Vault Secrets Officer` on `kv-uks-integration-{env}` to populate secrets before the first deploy |
 | Service Bus tier | Standard or Premium — Basic does not support topics |
 | Azure CLI | `az` ≥ 2.50; run `az account set --subscription {id}` before starting |
@@ -81,11 +83,11 @@ Create **6 app registrations** in Microsoft Entra ID. These are the identities t
 
 | Purpose | App registration name |
 |---|---|
-| IaC deploy — dev | `DevOps-DTS-LogicApp-IaC-Dev` |
-| IaC deploy — UAT | `DevOps-DTS-LogicApp-IaC-Uat` |
-| IaC deploy — prod | `DevOps-DTS-LogicApp-IaC-Prod` |
+| IaC deploy — dev | `DevOps-DTS-CoreTech-IaC-Dev` |
+| IaC deploy — UAT | `DevOps-DTS-CoreTech-IaC-UAT` |
+| IaC deploy — prod | `DevOps-DTS-CoreTech-IaC-Prod` |
 | App (workflow) deploy — dev | `DevOps-DTS-LogicApp-CodeRelease-Dev` |
-| App (workflow) deploy — UAT | `DevOps-DTS-LogicApp-CodeRelease-Uat` |
+| App (workflow) deploy — UAT | `DevOps-DTS-LogicApp-CodeRelease-UAT` |
 | App (workflow) deploy — prod | `DevOps-DTS-LogicApp-CodeRelease-Prod` |
 
 **For each app registration, add a federated credential:**
@@ -98,11 +100,11 @@ Create **6 app registrations** in Microsoft Entra ID. These are the identities t
 
    The service connection names to use in the subject are:
    ```
-   sc://{org}/{project}/DevOps-DTS-LogicApp-IaC-Dev
-   sc://{org}/{project}/DevOps-DTS-LogicApp-IaC-Uat
-   sc://{org}/{project}/DevOps-DTS-LogicApp-IaC-Prod
+   sc://{org}/{project}/DevOps-DTS-CoreTech-IaC-Dev
+   sc://{org}/{project}/DevOps-DTS-CoreTech-IaC-UAT
+   sc://{org}/{project}/DevOps-DTS-CoreTech-IaC-Prod
    sc://{org}/{project}/DevOps-DTS-LogicApp-CodeRelease-Dev
-   sc://{org}/{project}/DevOps-DTS-LogicApp-CodeRelease-Uat
+   sc://{org}/{project}/DevOps-DTS-LogicApp-CodeRelease-UAT
    sc://{org}/{project}/DevOps-DTS-LogicApp-CodeRelease-Prod
    ```
 3. Note the **Application (client) ID** and **Directory (tenant) ID** for each — needed when creating service connections (step 0.4).
@@ -113,17 +115,17 @@ Create **6 app registrations** in Microsoft Entra ID. These are the identities t
 
 Assign the following roles to each app registration's **service principal** (not the app reg itself — the enterprise application object):
 
-**IaC service principals** (`DevOps-DTS-LogicApp-IaC-{Dev/Uat/Prod}`)
+**IaC service principals** (`DevOps-DTS-CoreTech-IaC-{Dev/UAT/Prod}`)
 
 | Scope | Role | Reason |
 |---|---|---|
 | Subscription | **Reader** | ADO validates every service connection by calling `GET /subscriptions/{id}` — without this the pipeline fails with `AuthorizationFailed: subscriptions/read` before any deployment step runs |
-| `rg-uks-dts-{env}` | **Owner** | Deploys resources and creates RBAC role assignments (storage, SB) for the Logic App MI |
-| `rg-uks-integration-{env}` | **Contributor** | Cross-RG Service Bus module deploys topics and subscriptions into the shared integration RG |
+| `rg-uks-dts-{env}` | **Contributor** | Deploys the Logic App, App Service Plan, config and data storage accounts |
+| `rg-uks-integrationplatform-{env}` | **Contributor** | Cross-RG `serviceBusResources` module creates Service Bus topics/subscriptions; `alertRules` module deploys alert rules |
 
-> `Owner` (not `Contributor`) is required on `rg-uks-dts-{env}` because the Bicep templates write role assignments for the Logic App managed identity. If your organisation prohibits `Owner`, grant `Contributor` plus `User Access Administrator` on that RG instead.
+> RBAC role assignments for the Logic App MI (Storage Blob/Table Contributor, Service Bus Data roles, KV Secrets User) are **not** deployed by this pipeline — they are assigned manually by the infrastructure/app-support team after provisioning. Notify them of the `logicAppPrincipalId` output from the IaC deployment (step 3).
 
-**CodeRelease service principals** (`DevOps-DTS-LogicApp-CodeRelease-{Dev/Uat/Prod}`)
+**CodeRelease service principals** (`DevOps-DTS-LogicApp-CodeRelease-{Dev/UAT/Prod}`)
 
 | Scope | Role | Reason |
 |---|---|---|
@@ -134,7 +136,7 @@ Assign the following roles to each app registration's **service principal** (not
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
 # Example: full role assignments for the IaC-Dev SP
-SP_OBJECT_ID=$(az ad sp show --id {DevOps-DTS-LogicApp-IaC-Dev-client-id} --query id -o tsv)
+SP_OBJECT_ID=$(az ad sp show --id {DevOps-DTS-CoreTech-IaC-Dev-client-id} --query id -o tsv)
 
 # Reader on the subscription — required for ADO service connection validation
 az role assignment create \
@@ -142,17 +144,17 @@ az role assignment create \
   --role Reader \
   --scope /subscriptions/$SUBSCRIPTION_ID
 
-# Owner on the DTS resource group
-az role assignment create \
-  --assignee $SP_OBJECT_ID \
-  --role Owner \
-  --scope $(az group show --name rg-uks-dts-dev --query id -o tsv)
-
-# Contributor on the shared integration RG
+# Contributor on the DTS resource group
 az role assignment create \
   --assignee $SP_OBJECT_ID \
   --role Contributor \
-  --scope $(az group show --name rg-uks-integration-dev --query id -o tsv)
+  --scope $(az group show --name rg-uks-dts-dev --query id -o tsv)
+
+# Contributor on the shared integration RG (for Service Bus topics + alert rules)
+az role assignment create \
+  --assignee $SP_OBJECT_ID \
+  --role Contributor \
+  --scope $(az group show --name rg-uks-integrationplatform-dev --query id -o tsv)
 ```
 
 Repeat for each of the 6 SPs, adding the subscription-scope `Reader` assignment to all of them and the environment-appropriate RG roles for each.
@@ -175,11 +177,11 @@ Use exactly these service connection names (they are hardcoded in the YAML pipel
 
 | Service connection / App registration | Environment |
 |---|---|
-| `DevOps-DTS-LogicApp-IaC-Dev` | dev |
-| `DevOps-DTS-LogicApp-IaC-Uat` | uat |
-| `DevOps-DTS-LogicApp-IaC-Prod` | prod |
+| `DevOps-DTS-CoreTech-IaC-Dev` | dev |
+| `DevOps-DTS-CoreTech-IaC-UAT` | uat |
+| `DevOps-DTS-CoreTech-IaC-Prod` | prod |
 | `DevOps-DTS-LogicApp-CodeRelease-Dev` | dev |
-| `DevOps-DTS-LogicApp-CodeRelease-Uat` | uat |
+| `DevOps-DTS-LogicApp-CodeRelease-UAT` | uat |
 | `DevOps-DTS-LogicApp-CodeRelease-Prod` | prod |
 
 After saving each connection, verify it with **Verify connection** in the portal.
@@ -251,7 +253,7 @@ az group create --name rg-uks-dts-{env} --location uksouth
 az group create --name rg-ukw-dts-prod --location ukwest
 ```
 
-The shared integration platform RG (`rg-uks-integration-{env}`) must already exist before you proceed.
+The shared integration platform RG (`rg-uks-integrationplatform-{env}`) must already exist before you proceed. The VNet and networking resources in the DTS RG are created by the infrastructure team — coordinate with them before running the IaC pipeline so VNet integration can be applied post-deploy.
 
 ---
 
@@ -321,13 +323,122 @@ az deployment group show \
   --query properties.outputs
 ```
 
-Expected outputs: `logicAppName`, `logicAppPrincipalId`, `dataStorageAccountName`, `configStorageAccountName`, `sharedKeyVaultUri`, `vnetId`.
+Expected outputs: `logicAppName`, `logicAppPrincipalId`, `dataStorageAccountName`, `configStorageAccountName`, `sharedKeyVaultUri`.
 
-> **VNet address space:** The default `vnetAddressPrefix` (`10.0.0.0/16`) is a placeholder. Verify it does not overlap with your organisation's hub/spoke or corporate VPN address space before deploying. Override via `--parameters vnetAddressPrefix="10.x.x.x/16"` or add it to the `*.parameters.bicepparam` file.
->
-> **Corporate network access:** To allow the Apollo IT support team to call the internal ops workflows (`wf-trigger-http-manual`, `wf-trigger-http-replay`) from Postman, set `corporateNetworkCidr` to the corporate VPN/ExpressRoute CIDR: `--parameters corporateNetworkCidr="10.100.0.0/16"`. Without this, HTTP trigger access is restricted to traffic originating from within the Azure VNet itself.
->
-> **Note:** The Logic App will report errors in Application Insights until workflows are deployed (step 4) and the SharePoint connection URL is populated (step 5). This is expected.
+> **Note:** The Logic App will report errors in Application Insights until workflows are deployed (step 4) and the SharePoint connection URL is populated (step 5). This is expected. Steps 3.1 and 3.2 below must be completed before workflows can run successfully.
+
+---
+
+### 3.1 — Manual: RBAC role assignments (app-support / infrastructure team)
+
+> **Performed by:** app-support or infrastructure team, not the CI/CD pipeline.
+> **Trigger:** raise a request with the team after the IaC deployment completes. Provide them with the `logicAppPrincipalId` from the deployment outputs.
+
+The Logic App runs as a System-Assigned Managed Identity. The following roles must be assigned to that identity before workflows can operate:
+
+| Resource | Role | Purpose |
+|---|---|---|
+| `sta{loc}dtsconfig{env}` (config storage) | Storage Blob Data Contributor | Logic App runtime blobs (state, artifact cache) |
+| `sta{loc}dtsconfig{env}` (config storage) | Storage Queue Data Contributor | Logic App internal queue triggers |
+| `sta{loc}dtsconfig{env}` (config storage) | Storage Table Data Contributor | Logic App internal state tables |
+| `sta{loc}dtsconfig{env}` (config storage) | Storage File Data Privileged Contributor | Logic App content file share (`WEBSITE_CONTENTSHARE`) |
+| `sta{loc}dtsdata{env}` (data storage) | Storage Blob Data Contributor | Read/write staging, quarantine, and records blob containers |
+| `sta{loc}dtsdata{env}` (data storage) | Storage Table Data Contributor | Read/write all DTS Azure Tables |
+| `sbns-uks-integrationplatform-{env}` (Service Bus namespace) | Azure Service Bus Data Sender | Publish delivery and notification messages |
+| `sbns-uks-integrationplatform-{env}` (Service Bus namespace) | Azure Service Bus Data Receiver | Consume delivery request subscriptions |
+| `kv-uks-integration-{env}` (Key Vault) | Key Vault Secrets User | Read APIM key, App Insights connection string, ACS endpoint at runtime |
+
+> The four config-storage roles are required because the Logic App authenticates to its backing storage via Managed Identity (no connection string). The Logic App will start in a failed state after deployment and recover automatically once all roles are assigned.
+
+```bash
+# Retrieve the Logic App MI object ID from the deployment output
+PRINCIPAL_ID=$(az deployment group show \
+  --resource-group rg-uks-dts-{env} \
+  --name {deployment-name} \
+  --query properties.outputs.logicAppPrincipalId.value -o tsv)
+
+CONFIG_STORAGE=sta{loc}dtsconfig{env}
+DATA_STORAGE=sta{loc}dtsdata{env}
+SBUS_NS=sbns-uks-integrationplatform-{env}
+KEY_VAULT=kv-uks-integration-{env}
+DTS_RG=rg-uks-dts-{env}
+SHARED_RG=rg-uks-integrationplatform-{env}
+
+CONFIG_SCOPE=$(az storage account show --name $CONFIG_STORAGE --resource-group $DTS_RG --query id -o tsv)
+DATA_SCOPE=$(az storage account show  --name $DATA_STORAGE  --resource-group $DTS_RG --query id -o tsv)
+SBUS_SCOPE=$(az servicebus namespace show --name $SBUS_NS --resource-group $SHARED_RG --query id -o tsv)
+KV_SCOPE=$(az keyvault show --name $KEY_VAULT --resource-group $SHARED_RG --query id -o tsv)
+
+# Config storage — four roles for MI-based backing storage auth
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage Blob Data Contributor"          --scope $CONFIG_SCOPE
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage Queue Data Contributor"         --scope $CONFIG_SCOPE
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage Table Data Contributor"         --scope $CONFIG_SCOPE
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage File Data Privileged Contributor" --scope $CONFIG_SCOPE
+
+# Data storage — blob and table access for DTS workflows
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage Blob Data Contributor"  --scope $DATA_SCOPE
+az role assignment create --assignee $PRINCIPAL_ID --role "Storage Table Data Contributor" --scope $DATA_SCOPE
+
+# Service Bus
+az role assignment create --assignee $PRINCIPAL_ID --role "Azure Service Bus Data Sender"   --scope $SBUS_SCOPE
+az role assignment create --assignee $PRINCIPAL_ID --role "Azure Service Bus Data Receiver" --scope $SBUS_SCOPE
+
+# Key Vault
+az role assignment create --assignee $PRINCIPAL_ID --role "Key Vault Secrets User" --scope $KV_SCOPE
+```
+
+---
+
+### 3.2 — Manual: VNet and network configuration (infrastructure team)
+
+> **Performed by:** infrastructure team, not the CI/CD pipeline.
+> **Trigger:** raise a request after the IaC deployment completes. Provide the resource names below.
+
+The Logic App and storage are deployed without network restrictions. The infrastructure team applies the following after provisioning:
+
+**VNet and subnets** (create in `rg-uks-dts-{env}`)
+
+| Resource | Name pattern | Notes |
+|---|---|---|
+| VNet | `vnet-{loc}-dts-{env}` | Address space: agree with infra team to avoid overlap with hub/spoke |
+| Logic App integration subnet | `snet-{loc}-dts-logicapp-{env}` | Min `/28`, recommend `/26`; delegation: `Microsoft.Web/serverFarms`; service endpoints: `Microsoft.Storage`, `Microsoft.ServiceBus`, `Microsoft.KeyVault` |
+| Storage private endpoint subnet | `snet-{loc}-dts-storage-{env}` | `/27` sufficient; `privateEndpointNetworkPolicies: Disabled` |
+
+**Logic App VNet integration**
+
+After the VNet and Logic App integration subnet exist, enable VNet integration on the Logic App:
+
+```bash
+az webapp vnet-integration add \
+  --name logic-{loc}-dts-{env} \
+  --resource-group rg-uks-dts-{env} \
+  --vnet vnet-{loc}-dts-{env} \
+  --subnet snet-{loc}-dts-logicapp-{env}
+```
+
+**Private endpoints for storage accounts**
+
+Four endpoints required on the config storage (`sta{loc}dtsconfig{env}`): `blob`, `table`, `queue`, `file`.  
+Two endpoints required on the data storage (`sta{loc}dtsdata{env}`): `blob`, `table`.  
+All endpoints should target the storage private endpoint subnet and register with the corresponding private DNS zones (`privatelink.blob.core.windows.net`, etc.).
+
+**Storage network ACL lockdown** (after private endpoints are active)
+
+```bash
+# Lock down config storage
+az storage account update \
+  --name sta{loc}dtsconfig{env} \
+  --resource-group rg-uks-dts-{env} \
+  --default-action Deny \
+  --bypass AzureServices
+
+# Lock down data storage
+az storage account update \
+  --name sta{loc}dtsdata{env} \
+  --resource-group rg-uks-dts-{env} \
+  --default-action Deny \
+  --bypass AzureServices
+```
 
 ---
 
