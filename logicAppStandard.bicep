@@ -74,9 +74,13 @@ resource servicePlan 'Microsoft.Web/serverfarms@2022-09-01' = {
 }
 
 // ── Logic App Standard ─────────────────────────────────────────────────────────
-// Config storage is accessed via Managed Identity (no shared-key connection string).
-// ARM skips storage connectivity validation during deployment; the runtime connects
-// once the infra team has assigned the required roles to the Logic App MI (step 3.1).
+// AzureWebJobsStorage uses MI auth (no shared-key call needed for blob/queue/table).
+// WEBSITE_CONTENTAZUREFILECONNECTIONSTRING must remain a full connection string —
+// the App Service ARM provider enforces the exact setting name and rejects the
+// __accountName variant. The config storage has no network restrictions so ARM
+// can validate the connection string during provisioning.
+
+var configStorageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${configStorage.name};AccountKey=${configStorage.listKeys().keys[0].value};EndpointSuffix=${az.environment().suffixes.storage}'
 
 resource logicApp 'Microsoft.Web/sites@2022-09-01' = {
   name: logicAppName
@@ -100,13 +104,10 @@ resource logicApp 'Microsoft.Web/sites@2022-09-01' = {
         { name: 'FUNCTIONS_WORKER_RUNTIME',     value: 'node' }
         { name: 'APP_KIND',                     value: 'workflowapp' }
         { name: 'WEBSITE_RUN_FROM_PACKAGE',     value: '1' }
-        // MI-based config storage — avoids shared-key auth; ARM won't validate
-        // storage connectivity during deployment. Roles assigned post-deploy (step 3.1).
-        { name: 'AzureWebJobsStorage__accountName',                      value: configStorage.name }
-        { name: 'AzureWebJobsStorage__credential',                       value: 'managedidentity' }
-        { name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING__accountName',  value: configStorage.name }
-        { name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING__credential',   value: 'managedidentity' }
-        { name: 'WEBSITE_CONTENTSHARE',                                   value: logicAppName }
+        { name: 'AzureWebJobsStorage__accountName', value: configStorage.name }
+        { name: 'AzureWebJobsStorage__credential',  value: 'managedidentity' }
+        { name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', value: configStorageConnectionString }
+        { name: 'WEBSITE_CONTENTSHARE',                     value: logicAppName }
         { name: 'AzureFunctionsJobHost__extensionBundle__id',      value: 'Microsoft.Azure.Functions.ExtensionBundle.Workflows' }
         { name: 'AzureFunctionsJobHost__extensionBundle__version', value: '[1.*, 2.0.0)' }
         // ── Observability ─────────────────────────────────────────────────────

@@ -338,17 +338,17 @@ The Logic App runs as a System-Assigned Managed Identity. The following roles mu
 
 | Resource | Role | Purpose |
 |---|---|---|
-| `sta{loc}dtsconfig{env}` (config storage) | Storage Blob Data Contributor | Logic App runtime blobs (state, artifact cache) |
-| `sta{loc}dtsconfig{env}` (config storage) | Storage Queue Data Contributor | Logic App internal queue triggers |
-| `sta{loc}dtsconfig{env}` (config storage) | Storage Table Data Contributor | Logic App internal state tables |
-| `sta{loc}dtsconfig{env}` (config storage) | Storage File Data Privileged Contributor | Logic App content file share (`WEBSITE_CONTENTSHARE`) |
+| `sta{loc}dtsconfig{env}` (config storage) | Storage Blob Data Contributor | `AzureWebJobsStorage` MI auth — runtime blobs, state, artifact cache |
+| `sta{loc}dtsconfig{env}` (config storage) | Storage Queue Data Contributor | `AzureWebJobsStorage` MI auth — internal queue triggers |
+| `sta{loc}dtsconfig{env}` (config storage) | Storage Table Data Contributor | `AzureWebJobsStorage` MI auth — internal state tables |
+
 | `sta{loc}dtsdata{env}` (data storage) | Storage Blob Data Contributor | Read/write staging, quarantine, and records blob containers |
 | `sta{loc}dtsdata{env}` (data storage) | Storage Table Data Contributor | Read/write all DTS Azure Tables |
 | `sbns-uks-integrationplatform-{env}` (Service Bus namespace) | Azure Service Bus Data Sender | Publish delivery and notification messages |
 | `sbns-uks-integrationplatform-{env}` (Service Bus namespace) | Azure Service Bus Data Receiver | Consume delivery request subscriptions |
 | `kv-uks-integration-{env}` (Key Vault) | Key Vault Secrets User | Read APIM key, App Insights connection string, ACS endpoint at runtime |
 
-> The four config-storage roles are required because the Logic App authenticates to its backing storage via Managed Identity (no connection string). The Logic App will start in a failed state after deployment and recover automatically once all roles are assigned.
+> `AzureWebJobsStorage` uses Managed Identity (3 config-storage roles above). `WEBSITE_CONTENTAZUREFILECONNECTIONSTRING` uses the storage account key — the App Service ARM provider requires that exact setting name and does not accept the MI variant. If shared-key access is disabled by Azure Policy on the config storage, raise this with the infrastructure team.
 
 ```bash
 # Retrieve the Logic App MI object ID from the deployment output
