@@ -151,7 +151,9 @@ stages:
                     Copy-Item host.json       (Join-Path $stage 'host.json')
                     Copy-Item connections.json (Join-Path $stage 'connections.json')
                     $wfDirs = Get-ChildItem -Path workflows -Directory
-                    foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stage -Recurse }
+                    $stageWorkflows = Join-Path $stage 'workflows'
+                    New-Item -ItemType Directory -Path $stageWorkflows -Force | Out-Null
+                    foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stageWorkflows -Recurse }
                     Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                     Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                     Push-Location $stage
@@ -232,7 +234,9 @@ stages:
                       Copy-Item host.json       (Join-Path $stage 'host.json')
                       Copy-Item connections.json (Join-Path $stage 'connections.json')
                       $wfDirs = Get-ChildItem -Path workflows -Directory
-                      foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stage -Recurse }
+                      $stageWorkflows = Join-Path $stage 'workflows'
+                      New-Item -ItemType Directory -Path $stageWorkflows -Force | Out-Null
+                      foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stageWorkflows -Recurse }
                       Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                       Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                       Push-Location $stage
