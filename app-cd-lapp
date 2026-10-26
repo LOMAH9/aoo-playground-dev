@@ -117,6 +117,23 @@ stages:
                       -SettingsFile parameters/dev.app-settings.json
 
                 - task: AzureCLI@2
+                  displayName: 'Deploy secret app settings from variable group (dev)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
+                    scriptType: ps
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az logicapp config appsettings set `
+                        --name "$(LOGIC_APP_NAME)" `
+                        --resource-group "$(RESOURCE_GROUP)" `
+                        --settings `
+                          "APPLICATIONINSIGHTS_CONNECTION_STRING=$(APPINSIGHTS_CONNECTION_STRING)" `
+                          "appinsights_connection_string=$(APPINSIGHTS_CONNECTION_STRING)" `
+                          "appinsights_instrumentation_key=$(APPINSIGHTS_INSTRUMENTATION_KEY)" `
+                          "whitespace_api_audience_id=$(WHITESPACE_API_AUDIENCE_ID)" `
+                          "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
+
+                - task: AzureCLI@2
                   displayName: 'Zip Deploy to Logic App (dev)'
                   inputs:
                     azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
@@ -177,6 +194,23 @@ stages:
                       -LogicAppName $(LOGIC_APP_NAME)
                       -ResourceGroup $(RESOURCE_GROUP)
                       -SettingsFile parameters/uat.app-settings.json
+
+                - task: AzureCLI@2
+                  displayName: 'Deploy secret app settings from variable group (uat)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-UAT'
+                    scriptType: ps
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az logicapp config appsettings set `
+                        --name "$(LOGIC_APP_NAME)" `
+                        --resource-group "$(RESOURCE_GROUP)" `
+                        --settings `
+                          "APPLICATIONINSIGHTS_CONNECTION_STRING=$(APPINSIGHTS_CONNECTION_STRING)" `
+                          "appinsights_connection_string=$(APPINSIGHTS_CONNECTION_STRING)" `
+                          "appinsights_instrumentation_key=$(APPINSIGHTS_INSTRUMENTATION_KEY)" `
+                          "whitespace_api_audience_id=$(WHITESPACE_API_AUDIENCE_ID)" `
+                          "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
 
                 - task: AzureCLI@2
                   displayName: 'Zip Deploy to Logic App (uat)'
@@ -260,6 +294,23 @@ stages:
                         -LogicAppName $(LOGIC_APP_NAME)
                         -ResourceGroup $(RESOURCE_GROUP)
                         -SettingsFile parameters/prod.app-settings.json
+
+                  - task: AzureCLI@2
+                    displayName: 'Deploy secret app settings from variable group (prod)'
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Prod'
+                      scriptType: ps
+                      scriptLocation: inlineScript
+                      inlineScript: |
+                        az logicapp config appsettings set `
+                          --name "$(LOGIC_APP_NAME)" `
+                          --resource-group "$(RESOURCE_GROUP)" `
+                          --settings `
+                            "APPLICATIONINSIGHTS_CONNECTION_STRING=$(APPINSIGHTS_CONNECTION_STRING)" `
+                            "appinsights_connection_string=$(APPINSIGHTS_CONNECTION_STRING)" `
+                            "appinsights_instrumentation_key=$(APPINSIGHTS_INSTRUMENTATION_KEY)" `
+                            "whitespace_api_audience_id=$(WHITESPACE_API_AUDIENCE_ID)" `
+                            "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
 
                   - task: AzureCLI@2
                     displayName: 'Zip Deploy to Logic App (prod)'
