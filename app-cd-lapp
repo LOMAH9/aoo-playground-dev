@@ -22,6 +22,11 @@ parameters:
     default: dev-uat
     values: [dev, dev-uat, all]
 
+  - name: maxArtifactAgeHours
+    displayName: 'Max CI artifact age (hours) — fail if older'
+    type: number
+    default: 24
+
 trigger: none
 pr: none
 
@@ -39,9 +44,54 @@ pool:
 
 stages:
 
+  # ── ARTIFACT AGE GATE ─────────────────────────────────────────────────────────
+  # Rejects deploys of CI artifacts older than maxArtifactAgeHours (default 48 h).
+  # Calls the ADO build API using the pipeline's own OAuth token — no extra
+  # service connection required. Enable "Allow scripts to access OAuth token" on
+  # the pipeline if not already set, or pass SYSTEM_ACCESSTOKEN via env (done here).
+  - stage: ValidateArtifactAge
+    displayName: 'Validate CI artifact age'
+    jobs:
+      - job: ArtifactAgeCheck
+        displayName: 'Check CI artifact is not stale'
+        steps:
+          - powershell: |
+              $maxAgeHours = ${{ parameters.maxArtifactAgeHours }}
+              $runId       = "$(resources.pipeline.ci_app.runID)"
+              $orgUrl      = "$(System.TeamFoundationCollectionUri)".TrimEnd('/')
+              $project     = "$(System.TeamProject)"
+              $token       = $env:SYSTEM_ACCESSTOKEN
+
+              if (-not $runId -or $runId -eq '0') {
+                Write-Host "##[warning]CI run ID not resolved — skipping age check"
+                exit 0
+              }
+
+              $url     = "$orgUrl/$project/_apis/build/builds/$runId`?api-version=7.1"
+              $headers = @{ Authorization = "Bearer $token" }
+              $build   = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+
+              $finished = [datetime]::Parse($build.finishTime).ToUniversalTime()
+              $age      = (Get-Date).ToUniversalTime() - $finished
+
+              Write-Host "  CI run ID   : $runId"
+              Write-Host "  Finished    : $($finished.ToString('yyyy-MM-dd HH:mm')) UTC"
+              Write-Host "  Age         : $([int]$age.TotalHours)h $($age.Minutes)m"
+              Write-Host "  Max allowed : ${maxAgeHours}h"
+
+              if ($age.TotalHours -gt $maxAgeHours) {
+                Write-Host "##[error]CI artifacts are $([int]$age.TotalHours)h old (limit ${maxAgeHours}h). Re-run the CI pipeline or raise maxArtifactAgeHours."
+                exit 1
+              }
+              Write-Host "  Age check passed"
+            displayName: 'Verify CI artifacts are not stale'
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
   # ── DEV ──────────────────────────────────────────────────────────────────────
   - stage: DeployDev
     displayName: 'Deploy DEV'
+    dependsOn: ValidateArtifactAge
     variables:
       - group: vg-dts-dev-uks
     jobs:
@@ -53,13 +103,6 @@ stages:
             deploy:
               steps:
                 - checkout: self
-
-                - task: Cache@2
-                  displayName: 'Restore npm cache'
-                  inputs:
-                    key: 'npm | "$(Agent.OS)" | workflows/package-lock.json'
-                    restoreKeys: 'npm | "$(Agent.OS)"'
-                    path: $(Pipeline.Workspace)\.npm
 
                 - powershell: |
                     Write-Host "##[section]Packaging Logic App artifacts (dev)"
@@ -93,7 +136,7 @@ stages:
                     Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                     Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                     Push-Location $stage
-                    npm ci --cache "$(Pipeline.Workspace)\.npm" 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                    npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
                     if ($LASTEXITCODE -ne 0) {
                       Pop-Location
                       Write-Host "##[error]npm ci failed"
@@ -184,13 +227,6 @@ stages:
               steps:
                 - checkout: self
 
-                - task: Cache@2
-                  displayName: 'Restore npm cache'
-                  inputs:
-                    key: 'npm | "$(Agent.OS)" | workflows/package-lock.json'
-                    restoreKeys: 'npm | "$(Agent.OS)"'
-                    path: $(Pipeline.Workspace)\.npm
-
                 - powershell: |
                     Write-Host "##[section]Packaging Logic App artifacts (uat)"
                     $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
@@ -203,7 +239,7 @@ stages:
                     Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                     Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                     Push-Location $stage
-                    npm ci --cache "$(Pipeline.Workspace)\.npm" 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                    npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
                     if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "##[error]npm ci failed"; exit 1 }
                     Pop-Location
                     Copy-Item parameters\uat.parameters.json (Join-Path $stage 'parameters.json')
@@ -308,13 +344,6 @@ stages:
                 steps:
                   - checkout: self
 
-                  - task: Cache@2
-                    displayName: 'Restore npm cache'
-                    inputs:
-                      key: 'npm | "$(Agent.OS)" | workflows/package-lock.json'
-                      restoreKeys: 'npm | "$(Agent.OS)"'
-                      path: $(Pipeline.Workspace)\.npm
-
                   - powershell: |
                       Write-Host "##[section]Packaging Logic App artifacts (prod)"
                       $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
@@ -327,7 +356,7 @@ stages:
                       Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                       Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                       Push-Location $stage
-                      npm ci --cache "$(Pipeline.Workspace)\.npm" 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                      npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
                       if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "##[error]npm ci failed"; exit 1 }
                       Pop-Location
                       Copy-Item parameters\prod.parameters.json (Join-Path $stage 'parameters.json')
