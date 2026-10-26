@@ -54,6 +54,13 @@ stages:
               steps:
                 - checkout: self
 
+                - task: Cache@2
+                  displayName: 'Restore npm cache'
+                  inputs:
+                    key: 'npm | "$(Agent.OS)" | workflows/package-lock.json'
+                    restoreKeys: 'npm | "$(Agent.OS)"'
+                    path: $(Pipeline.Workspace)\.npm
+
                 - powershell: |
                     Write-Host "##[section]Packaging Logic App artifacts (dev)"
                     $required = @('workflows\host.json', 'workflows\connections.json', 'workflows', 'parameters\dev.parameters.json')
@@ -86,7 +93,7 @@ stages:
                     Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                     Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                     Push-Location $stage
-                    npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                    npm ci --cache "$(Pipeline.Workspace)\.npm" 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
                     if ($LASTEXITCODE -ne 0) {
                       Pop-Location
                       Write-Host "##[error]npm ci failed"
@@ -131,6 +138,15 @@ stages:
                           "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
 
                 - task: AzureCLI@2
+                  displayName: 'Stop Logic App (dev)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
+                    scriptType: ps
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az logicapp stop --name "$(LOGIC_APP_NAME)" --resource-group "$(RESOURCE_GROUP)"
+
+                - task: AzureCLI@2
                   displayName: 'Zip Deploy to Logic App (dev)'
                   inputs:
                     azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
@@ -140,6 +156,16 @@ stages:
                     arguments: >-
                       -LogicAppName $(LOGIC_APP_NAME)
                       -ResourceGroup $(RESOURCE_GROUP)
+
+                - task: AzureCLI@2
+                  displayName: 'Start Logic App (dev)'
+                  condition: always()
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
+                    scriptType: ps
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az logicapp start --name "$(LOGIC_APP_NAME)" --resource-group "$(RESOURCE_GROUP)"
 
   # ── UAT ──────────────────────────────────────────────────────────────────────
   - stage: DeployUat
@@ -158,6 +184,13 @@ stages:
               steps:
                 - checkout: self
 
+                - task: Cache@2
+                  displayName: 'Restore npm cache'
+                  inputs:
+                    key: 'npm | "$(Agent.OS)" | workflows/package-lock.json'
+                    restoreKeys: 'npm | "$(Agent.OS)"'
+                    path: $(Pipeline.Workspace)\.npm
+
                 - powershell: |
                     Write-Host "##[section]Packaging Logic App artifacts (uat)"
                     $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
@@ -170,7 +203,7 @@ stages:
                     Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                     Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                     Push-Location $stage
-                    npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                    npm ci --cache "$(Pipeline.Workspace)\.npm" 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
                     if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "##[error]npm ci failed"; exit 1 }
                     Pop-Location
                     Copy-Item parameters\uat.parameters.json (Join-Path $stage 'parameters.json')
@@ -208,6 +241,15 @@ stages:
                           "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
 
                 - task: AzureCLI@2
+                  displayName: 'Stop Logic App (uat)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-UAT'
+                    scriptType: ps
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az logicapp stop --name "$(LOGIC_APP_NAME)" --resource-group "$(RESOURCE_GROUP)"
+
+                - task: AzureCLI@2
                   displayName: 'Zip Deploy to Logic App (uat)'
                   inputs:
                     azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-UAT'
@@ -217,6 +259,16 @@ stages:
                     arguments: >-
                       -LogicAppName $(LOGIC_APP_NAME)
                       -ResourceGroup $(RESOURCE_GROUP)
+
+                - task: AzureCLI@2
+                  displayName: 'Start Logic App (uat)'
+                  condition: always()
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-UAT'
+                    scriptType: ps
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az logicapp start --name "$(LOGIC_APP_NAME)" --resource-group "$(RESOURCE_GROUP)"
 
   # ── PROD ─────────────────────────────────────────────────────────────────────
   - ${{ if eq(parameters.deployTo, 'all') }}:
@@ -256,6 +308,13 @@ stages:
                 steps:
                   - checkout: self
 
+                  - task: Cache@2
+                    displayName: 'Restore npm cache'
+                    inputs:
+                      key: 'npm | "$(Agent.OS)" | workflows/package-lock.json'
+                      restoreKeys: 'npm | "$(Agent.OS)"'
+                      path: $(Pipeline.Workspace)\.npm
+
                   - powershell: |
                       Write-Host "##[section]Packaging Logic App artifacts (prod)"
                       $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
@@ -268,7 +327,7 @@ stages:
                       Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                       Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                       Push-Location $stage
-                      npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                      npm ci --cache "$(Pipeline.Workspace)\.npm" 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
                       if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "##[error]npm ci failed"; exit 1 }
                       Pop-Location
                       Copy-Item parameters\prod.parameters.json (Join-Path $stage 'parameters.json')
@@ -301,10 +360,18 @@ stages:
                           --resource-group "$(RESOURCE_GROUP)" `
                           --settings `
                             "APPLICATIONINSIGHTS_CONNECTION_STRING=$(APPINSIGHTS_CONNECTION_STRING)" `
-                            "appinsights_connection_string=$(APPINSIGHTS_CONNECTION_STRING)" `
                             "appinsights_instrumentation_key=$(APPINSIGHTS_INSTRUMENTATION_KEY)" `
                             "whitespace_api_audience_id=$(WHITESPACE_API_AUDIENCE_ID)" `
                             "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
+
+                  - task: AzureCLI@2
+                    displayName: 'Stop Logic App (prod)'
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Prod'
+                      scriptType: ps
+                      scriptLocation: inlineScript
+                      inlineScript: |
+                        az logicapp stop --name "$(LOGIC_APP_NAME)" --resource-group "$(RESOURCE_GROUP)"
 
                   - task: AzureCLI@2
                     displayName: 'Zip Deploy to Logic App (prod)'
@@ -316,3 +383,13 @@ stages:
                       arguments: >-
                         -LogicAppName $(LOGIC_APP_NAME)
                         -ResourceGroup $(RESOURCE_GROUP)
+
+                  - task: AzureCLI@2
+                    displayName: 'Start Logic App (prod)'
+                    condition: always()
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Prod'
+                      scriptType: ps
+                      scriptLocation: inlineScript
+                      inlineScript: |
+                        az logicapp start --name "$(LOGIC_APP_NAME)" --resource-group "$(RESOURCE_GROUP)"
