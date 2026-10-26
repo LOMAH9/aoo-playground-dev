@@ -74,8 +74,12 @@ stages:
 
                     $wfDirs = Get-ChildItem -Path workflows -Directory
                     Write-Host "  Workflows  : $($wfDirs.Count) found"
+                    
+                    $stageWorkflows = Join-Path $stage 'workflows'
+                    New-Item -ItemType Directory -Path $stageWorkflows -Force | Out-Null
+                    
                     foreach ($wf in $wfDirs) {
-                      Copy-Item -Path $wf.FullName -Destination $stage -Recurse
+                      Copy-Item -Path $wf.FullName -Destination $stageWorkflows -Recurse
                       Write-Host "  [STAGED]   $($wf.Name)/"
                     }
 
