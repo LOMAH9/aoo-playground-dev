@@ -56,7 +56,7 @@ stages:
 
                 - powershell: |
                     Write-Host "##[section]Packaging Logic App artifacts (dev)"
-                    $required = @('host.json', 'connections.json', 'workflows', 'parameters/dev.parameters.json')
+                    $required = @('workflows\host.json', 'workflows\connections.json', 'workflows', 'parameters\dev.parameters.json')
                     $missing  = @()
                     foreach ($p in $required) {
                       if (Test-Path $p) { Write-Host "  [FOUND]   $p" }
@@ -69,17 +69,15 @@ stages:
 
                     $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
                     New-Item -ItemType Directory -Path $stage -Force | Out-Null
-                    Copy-Item host.json       (Join-Path $stage 'host.json')
-                    Copy-Item connections.json (Join-Path $stage 'connections.json')
+                    Copy-Item workflows\host.json        (Join-Path $stage 'host.json')
+                    Copy-Item workflows\connections.json (Join-Path $stage 'connections.json')
 
-                    $wfDirs = Get-ChildItem -Path workflows -Directory
+                    # Only dirs that contain workflow.json — excludes .vscode, workflow-designtime, node_modules
+                    $wfDirs = Get-ChildItem -Path workflows -Directory |
+                              Where-Object { Test-Path (Join-Path $_.FullName 'workflow.json') }
                     Write-Host "  Workflows  : $($wfDirs.Count) found"
-                    
-                    $stageWorkflows = Join-Path $stage 'workflows'
-                    New-Item -ItemType Directory -Path $stageWorkflows -Force | Out-Null
-                    
                     foreach ($wf in $wfDirs) {
-                      Copy-Item -Path $wf.FullName -Destination $stageWorkflows -Recurse
+                      Copy-Item -Path $wf.FullName -Destination $stage -Recurse
                       Write-Host "  [STAGED]   $($wf.Name)/"
                     }
 
@@ -128,7 +126,6 @@ stages:
                         --resource-group "$(RESOURCE_GROUP)" `
                         --settings `
                           "APPLICATIONINSIGHTS_CONNECTION_STRING=$(APPINSIGHTS_CONNECTION_STRING)" `
-                          "appinsights_connection_string=$(APPINSIGHTS_CONNECTION_STRING)" `
                           "appinsights_instrumentation_key=$(APPINSIGHTS_INSTRUMENTATION_KEY)" `
                           "whitespace_api_audience_id=$(WHITESPACE_API_AUDIENCE_ID)" `
                           "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
@@ -165,12 +162,11 @@ stages:
                     Write-Host "##[section]Packaging Logic App artifacts (uat)"
                     $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
                     New-Item -ItemType Directory -Path $stage -Force | Out-Null
-                    Copy-Item host.json       (Join-Path $stage 'host.json')
-                    Copy-Item connections.json (Join-Path $stage 'connections.json')
-                    $wfDirs = Get-ChildItem -Path workflows -Directory
-                    $stageWorkflows = Join-Path $stage 'workflows'
-                    New-Item -ItemType Directory -Path $stageWorkflows -Force | Out-Null
-                    foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stageWorkflows -Recurse }
+                    Copy-Item workflows\host.json        (Join-Path $stage 'host.json')
+                    Copy-Item workflows\connections.json (Join-Path $stage 'connections.json')
+                    $wfDirs = Get-ChildItem -Path workflows -Directory |
+                              Where-Object { Test-Path (Join-Path $_.FullName 'workflow.json') }
+                    foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stage -Recurse }
                     Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                     Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                     Push-Location $stage
@@ -207,7 +203,6 @@ stages:
                         --resource-group "$(RESOURCE_GROUP)" `
                         --settings `
                           "APPLICATIONINSIGHTS_CONNECTION_STRING=$(APPINSIGHTS_CONNECTION_STRING)" `
-                          "appinsights_connection_string=$(APPINSIGHTS_CONNECTION_STRING)" `
                           "appinsights_instrumentation_key=$(APPINSIGHTS_INSTRUMENTATION_KEY)" `
                           "whitespace_api_audience_id=$(WHITESPACE_API_AUDIENCE_ID)" `
                           "whitespace_api_apim_subscription_key=$(WHITESPACE_API_APIM_SUBSCRIPTION_KEY)"
@@ -265,12 +260,11 @@ stages:
                       Write-Host "##[section]Packaging Logic App artifacts (prod)"
                       $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
                       New-Item -ItemType Directory -Path $stage -Force | Out-Null
-                      Copy-Item host.json       (Join-Path $stage 'host.json')
-                      Copy-Item connections.json (Join-Path $stage 'connections.json')
-                      $wfDirs = Get-ChildItem -Path workflows -Directory
-                      $stageWorkflows = Join-Path $stage 'workflows'
-                      New-Item -ItemType Directory -Path $stageWorkflows -Force | Out-Null
-                      foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stageWorkflows -Recurse }
+                      Copy-Item workflows\host.json        (Join-Path $stage 'host.json')
+                      Copy-Item workflows\connections.json (Join-Path $stage 'connections.json')
+                      $wfDirs = Get-ChildItem -Path workflows -Directory |
+                                Where-Object { Test-Path (Join-Path $_.FullName 'workflow.json') }
+                      foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stage -Recurse }
                       Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
                       Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
                       Push-Location $stage
