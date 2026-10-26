@@ -1,0 +1,265 @@
+name: CD - App - DTS Logic App Workflows
+
+# Triggered automatically when CI - App passes on develop (dev stage) or main (all stages).
+# UAT and prod stages require manual approval via ADO Environments.
+#
+# Azure DevOps portal setup (one-time):
+#   Environments > uat  > Approvals: 1 approver required
+#   Environments > prod > Approvals: min 2 approvers, requester cannot self-approve, timeout 4 h
+#   Service connections (Workload Identity Federation, name = app registration):
+#     DevOps-DTS-LogicApp-CodeRelease-Dev
+#     DevOps-DTS-LogicApp-CodeRelease-UAT
+#     DevOps-DTS-LogicApp-CodeRelease-Prod
+#   Variable groups (Library):
+#     vg-dts-dev-uks  — LOGIC_APP_NAME, RESOURCE_GROUP
+#     vg-dts-uat-uks  — LOGIC_APP_NAME, RESOURCE_GROUP
+#     vg-dts-prod-uks — LOGIC_APP_NAME, RESOURCE_GROUP
+
+parameters:
+  - name: deployTo
+    displayName: 'Deploy to environments'
+    type: string
+    default: dev-uat
+    values: [dev, dev-uat, all]
+
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+    - pipeline: ci_app
+      source: 'DTS_CI_CD\dts_ci_logic_app_pipeline'
+      trigger:
+        branches:
+          include: [develop, main]
+
+pool:
+  name: 'Azure Pipelines'
+  vmImage: 'windows-latest'
+
+stages:
+
+  # ── DEV ──────────────────────────────────────────────────────────────────────
+  - stage: DeployDev
+    displayName: 'Deploy DEV'
+    variables:
+      - group: vg-dts-dev-uks
+    jobs:
+      - deployment: ZipDeploy
+        displayName: 'Package & Deploy (dev)'
+        environment: dts-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - powershell: |
+                    Write-Host "##[section]Packaging Logic App artifacts (dev)"
+                    $required = @('host.json', 'connections.json', 'workflows', 'parameters/dev.parameters.json')
+                    $missing  = @()
+                    foreach ($p in $required) {
+                      if (Test-Path $p) { Write-Host "  [FOUND]   $p" }
+                      else { Write-Host "  [MISSING] $p"; $missing += $p }
+                    }
+                    if ($missing.Count -gt 0) {
+                      Write-Host "##[error]Missing required files: $($missing -join ', ')"
+                      exit 1
+                    }
+
+                    $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
+                    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+                    Copy-Item host.json       (Join-Path $stage 'host.json')
+                    Copy-Item connections.json (Join-Path $stage 'connections.json')
+
+                    $wfDirs = Get-ChildItem -Path workflows -Directory
+                    Write-Host "  Workflows  : $($wfDirs.Count) found"
+                    foreach ($wf in $wfDirs) {
+                      Copy-Item -Path $wf.FullName -Destination $stage -Recurse
+                      Write-Host "  [STAGED]   $($wf.Name)/"
+                    }
+
+                    # Copy package files to staging root then install so node_modules ships in the zip
+                    Write-Host "  Installing npm dependencies into staging..."
+                    Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
+                    Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
+                    Push-Location $stage
+                    npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                    if ($LASTEXITCODE -ne 0) {
+                      Pop-Location
+                      Write-Host "##[error]npm ci failed"
+                      exit 1
+                    }
+                    Pop-Location
+
+                    Copy-Item parameters\dev.parameters.json (Join-Path $stage 'parameters.json')
+                    Write-Host "  [STAGED]   parameters.json (from parameters/dev.parameters.json)"
+
+                    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath logic-app-workflows.zip -Force
+                    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Host "##[section]Package created"
+                  displayName: 'Package Logic App artifacts'
+
+                - task: AzureCLI@2
+                  displayName: 'Deploy app settings (dev)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/app-settings-deploy.ps1
+                    arguments: >-
+                      -LogicAppName $(LOGIC_APP_NAME)
+                      -ResourceGroup $(RESOURCE_GROUP)
+                      -SettingsFile parameters/dev.app-settings.json
+
+                - task: AzureCLI@2
+                  displayName: 'Zip Deploy to Logic App (dev)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Dev'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/app-deploy.ps1
+                    arguments: >-
+                      -LogicAppName $(LOGIC_APP_NAME)
+                      -ResourceGroup $(RESOURCE_GROUP)
+
+  # ── UAT ──────────────────────────────────────────────────────────────────────
+  - stage: DeployUat
+    displayName: 'Deploy UAT'
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      - group: vg-dts-uat-uks
+    jobs:
+      - deployment: ZipDeploy
+        displayName: 'Package & Deploy (uat)'
+        environment: dts-uat
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - powershell: |
+                    Write-Host "##[section]Packaging Logic App artifacts (uat)"
+                    $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
+                    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+                    Copy-Item host.json       (Join-Path $stage 'host.json')
+                    Copy-Item connections.json (Join-Path $stage 'connections.json')
+                    $wfDirs = Get-ChildItem -Path workflows -Directory
+                    foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stage -Recurse }
+                    Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
+                    Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
+                    Push-Location $stage
+                    npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                    if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "##[error]npm ci failed"; exit 1 }
+                    Pop-Location
+                    Copy-Item parameters\uat.parameters.json (Join-Path $stage 'parameters.json')
+                    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath logic-app-workflows.zip -Force
+                    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Host "##[section]Package created"
+                  displayName: 'Package Logic App artifacts'
+
+                - task: AzureCLI@2
+                  displayName: 'Deploy app settings (uat)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-UAT'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/app-settings-deploy.ps1
+                    arguments: >-
+                      -LogicAppName $(LOGIC_APP_NAME)
+                      -ResourceGroup $(RESOURCE_GROUP)
+                      -SettingsFile parameters/uat.app-settings.json
+
+                - task: AzureCLI@2
+                  displayName: 'Zip Deploy to Logic App (uat)'
+                  inputs:
+                    azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-UAT'
+                    scriptType: ps
+                    scriptLocation: scriptPath
+                    scriptPath: pipelines/scripts/app-deploy.ps1
+                    arguments: >-
+                      -LogicAppName $(LOGIC_APP_NAME)
+                      -ResourceGroup $(RESOURCE_GROUP)
+
+  # ── PROD ─────────────────────────────────────────────────────────────────────
+  - ${{ if eq(parameters.deployTo, 'all') }}:
+    - stage: DeployProd
+      displayName: 'Deploy PROD'
+      dependsOn: DeployUat
+      variables:
+        - group: vg-dts-prod-uks
+      jobs:
+        - job: DeploymentWindowCheck
+          displayName: 'Deployment window check (Mon-Thu 09:00-16:00 UTC)'
+          steps:
+            - powershell: |
+                $now  = [System.DateTime]::UtcNow
+                $day  = $now.DayOfWeek
+                $hour = $now.Hour
+                Write-Host "  UTC now : $($now.ToString('yyyy-MM-dd HH:mm')) ($day)"
+                if ($day -in @('Friday','Saturday','Sunday')) {
+                  Write-Host "##[error]Production deployments are not permitted on Fri/Sat/Sun"
+                  exit 1
+                }
+                if ($hour -lt 9 -or $hour -ge 16) {
+                  Write-Host "##[error]Production deployments are only permitted 09:00-16:00 UTC"
+                  exit 1
+                }
+                Write-Host "  Deployment window check passed"
+              displayName: 'Check deployment window'
+
+        - deployment: ZipDeploy
+          displayName: 'Package & Deploy (prod — requires 2 approvals)'
+          dependsOn: DeploymentWindowCheck
+          # Configure in Azure DevOps portal: Environments > prod > Approvals and checks.
+          environment: dts-prod
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+
+                  - powershell: |
+                      Write-Host "##[section]Packaging Logic App artifacts (prod)"
+                      $stage = Join-Path $env:TEMP "la-stage-$(Get-Date -Format 'yyyyMMddHHmmss')"
+                      New-Item -ItemType Directory -Path $stage -Force | Out-Null
+                      Copy-Item host.json       (Join-Path $stage 'host.json')
+                      Copy-Item connections.json (Join-Path $stage 'connections.json')
+                      $wfDirs = Get-ChildItem -Path workflows -Directory
+                      foreach ($wf in $wfDirs) { Copy-Item -Path $wf.FullName -Destination $stage -Recurse }
+                      Copy-Item workflows\package.json      (Join-Path $stage 'package.json')
+                      Copy-Item workflows\package-lock.json (Join-Path $stage 'package-lock.json') -ErrorAction SilentlyContinue
+                      Push-Location $stage
+                      npm ci --prefer-offline 2>&1 | ForEach-Object { Write-Host "  npm: $_" }
+                      if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Host "##[error]npm ci failed"; exit 1 }
+                      Pop-Location
+                      Copy-Item parameters\prod.parameters.json (Join-Path $stage 'parameters.json')
+                      Compress-Archive -Path (Join-Path $stage '*') -DestinationPath logic-app-workflows.zip -Force
+                      Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+                      Write-Host "##[section]Package created"
+                    displayName: 'Package Logic App artifacts'
+
+                  - task: AzureCLI@2
+                    displayName: 'Deploy app settings (prod)'
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Prod'
+                      scriptType: ps
+                      scriptLocation: scriptPath
+                      scriptPath: pipelines/scripts/app-settings-deploy.ps1
+                      arguments: >-
+                        -LogicAppName $(LOGIC_APP_NAME)
+                        -ResourceGroup $(RESOURCE_GROUP)
+                        -SettingsFile parameters/prod.app-settings.json
+
+                  - task: AzureCLI@2
+                    displayName: 'Zip Deploy to Logic App (prod)'
+                    inputs:
+                      azureSubscription: 'DevOps-DTS-LogicApp-CodeRelease-Prod'
+                      scriptType: ps
+                      scriptLocation: scriptPath
+                      scriptPath: pipelines/scripts/app-deploy.ps1
+                      arguments: >-
+                        -LogicAppName $(LOGIC_APP_NAME)
+                        -ResourceGroup $(RESOURCE_GROUP)
