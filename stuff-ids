@@ -1,10 +1,68 @@
-232bf333-54ee-466b-89e6-21fc59f5826a
-f97fbf87-0644-4dca-ba0c-78d6988070e1
-cb500e2d-f971-4802-8421-6cc0bec0a990
-d9e3d435-1a5f-4b96-96e5-509c57ff8926
+
+// ── Config storage role assignment names (existing manual assignments) ─────────
+// These GUIDs match the role assignments already present on stauksdtsconfigdev.
+// Prevents RoleAssignmentExists errors on re-deploy.
+param configStorageBlobRoleAssignmentName  = '232bf333-54ee-466b-89e6-21fc59f5826a'
+param configStorageQueueRoleAssignmentName = 'cb500e2d-f971-4802-8421-6cc0bec0a990'
+param configStorageTableRoleAssignmentName = 'f97fbf87-0644-4dca-ba0c-78d6988070e1'
+
+-----------------------------------------------
 
 
+// ── Config storage role assignment names ──────────────────────────────────────
+// Set to existing GUIDs when manual role assignments are already present on the
+// config storage account, to avoid RoleAssignmentExists on re-deploy.
+// Leave empty on first deploy to new environments (Bicep derives GUIDs via guid()).
+param configStorageBlobRoleAssignmentName string = ''
+param configStorageQueueRoleAssignmentName string = ''
+param configStorageTableRoleAssignmentName string = ''
 
+    configStorageBlobRoleAssignmentName:  configStorageBlobRoleAssignmentName
+    configStorageQueueRoleAssignmentName: configStorageQueueRoleAssignmentName
+    configStorageTableRoleAssignmentName: configStorageTableRoleAssignmentName
+-------------------------------------------------------------------------------------
+
+// ── Config storage role assignment names ──────────────────────────────────────
+// Leave empty on first deploy to new environments (Bicep derives GUIDs via guid()).
+// Set to the existing assignment GUIDs when pre-existing manual assignments are
+// present, to prevent RoleAssignmentExists errors on re-deploy.
+param configStorageBlobRoleAssignmentName string = ''
+param configStorageQueueRoleAssignmentName string = ''
+param configStorageTableRoleAssignmentName string = ''
+
+
+resource configStorageBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: empty(configStorageBlobRoleAssignmentName) ? guid(configStorage.id, logicApp.id, storageBlobDataContributorId) : configStorageBlobRoleAssignmentName
+  scope: configStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorId)
+    principalId: logicApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource configStorageQueueRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: empty(configStorageQueueRoleAssignmentName) ? guid(configStorage.id, logicApp.id, storageQueueDataContributorId) : configStorageQueueRoleAssignmentName
+  scope: configStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageQueueDataContributorId)
+    principalId: logicApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource configStorageTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: empty(configStorageTableRoleAssignmentName) ? guid(configStorage.id, logicApp.id, storageTableDataContributorId) : configStorageTableRoleAssignmentName
+  scope: configStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorId)
+    principalId: logicApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+
+----------------------------------
 
 
 
