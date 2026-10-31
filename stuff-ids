@@ -1,38 +1,8 @@
-Logic Apps Standard Contributor (1)
-DevOps-DTS-CoreTech-IaC-Dev
-dc49126d-7a1b-43f9-a70c-97fa29084a41
-Service principal
-Logic Apps Standard Contributor
-Resource group (Inherited)
-None
-Storage Account Contributor (1)
-DevOps-DTS-CoreTech-IaC-Dev
-dc49126d-7a1b-43f9-a70c-97fa29084a41
-Service principal
-Storage Account Contributor
-Resource group (Inherited)
-None
-Storage Blob Data Contributor (1)
-logic-uks-dts-dev
-11f4f30c-18a2-4ed3-8e01-f493ddacb922
-Managed identity
-Storage Blob Data Contributor
-This resource
-None
-Storage File Data SMB Share Contributor (1)
-logic-uks-dts-dev
-11f4f30c-18a2-4ed3-8e01-f493ddacb922
-Managed identity
-Storage File Data SMB Share Contributor
-This resource
-None
-Storage Queue Data Contributor (1)
-logic-uks-dts-dev
-11f4f30c-18a2-4ed3-8e01-f493ddacb922
-Managed identity
-Storage Queue Data Contributor
-This resource
-None
+232bf333-54ee-466b-89e6-21fc59f5826a
+f97fbf87-0644-4dca-ba0c-78d6988070e1
+cb500e2d-f971-4802-8421-6cc0bec0a990
+d9e3d435-1a5f-4b96-96e5-509c57ff8926
+
 
 
 
