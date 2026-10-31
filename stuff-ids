@@ -1,30 +1,6 @@
-Bicep deployment
-  Deployment name       : dts-bicep-dev-20261031143024
-  Resource group        : rg-uks-dts-dev
-  Shared resource group : rg-uks-integrationplatform-dev
-  Service Bus namespace : sbns-uks-integrationplatform-dev
-  APIM base URL         : https://apim-uks-integrationplatform-dev.azure-api.net
-  App Insights name     : appi-uks-integrationplatform-dev
-  Key Vault name        : kv-uks-integration-dev
-  Template              : infra/bicep/main.bicep
-  Parameters            : infra/bicep/dev.parameters.bicepparam
-WARNING: D:\a\1\s\infra\bicep\modules\alertRules.bicep(85,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
-
-
-WARNING: D:\a\1\s\infra\bicep\modules\alertRules.bicep(85,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
-
-
-ERROR: {"status":"Failed","error":{"code":"DeploymentFailed","target":"/subscriptions/21788d43-ca58-4712-93b1-c42e14ae6d6c/resourceGroups/rg-uks-dts-dev/providers/Microsoft.Resources/deployments/dts-bicep-dev-20261031143024","message":"At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details. Correlation ID: 97f6dbbf-91f9-4fd6-86fe-59dd9662a02a","details":[{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is 43751be69bcb41fc8cea8e5907bb5f77."},{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is 0ff834471e3e48759f9e6ad3db144f75."}]}}
-##[warning]Deployment failed - per-resource details:
-Resource                              Error
-------------------------------------  ---------------------------------------------------------------------------------------------------------------
-a81a72d0-7add-5afe-b247-7bd057025451  The role assignment already exists. The ID of the existing role assignment is 43751be69bcb41fc8cea8e5907bb5f77.
-62ead463-20ad-53f1-8248-3120bc4200f6  The role assignment already exists. The ID of the existing role assignment is 0ff834471e3e48759f9e6ad3db144f75.
-
-##[error]Script failed with exit code: 1
-----------------------------------
-
-
+0ff83447-1e3e-4875-9f9e-6ad3db144f75
+43751be6-9bcb-41fc-8cea-8e5907bb5f77
+a8c26a50-b9a2-477d-b592-3ce4a5687a50
 
 
 
