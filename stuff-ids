@@ -1,3 +1,45 @@
+Logic Apps Standard Contributor (1)
+DevOps-DTS-CoreTech-IaC-Dev
+dc49126d-7a1b-43f9-a70c-97fa29084a41
+Service principal
+Logic Apps Standard Contributor
+Resource group (Inherited)
+None
+Storage Account Contributor (1)
+DevOps-DTS-CoreTech-IaC-Dev
+dc49126d-7a1b-43f9-a70c-97fa29084a41
+Service principal
+Storage Account Contributor
+Resource group (Inherited)
+None
+Storage Blob Data Contributor (1)
+logic-uks-dts-dev
+11f4f30c-18a2-4ed3-8e01-f493ddacb922
+Managed identity
+Storage Blob Data Contributor
+This resource
+None
+Storage File Data SMB Share Contributor (1)
+logic-uks-dts-dev
+11f4f30c-18a2-4ed3-8e01-f493ddacb922
+Managed identity
+Storage File Data SMB Share Contributor
+This resource
+None
+Storage Queue Data Contributor (1)
+logic-uks-dts-dev
+11f4f30c-18a2-4ed3-8e01-f493ddacb922
+Managed identity
+Storage Queue Data Contributor
+This resource
+None
+
+
+
+
+
+
+
 D:\a\1\s\infra\bicep\modules\alertRules.bicep(83,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
 
 
