@@ -1,6 +1,51 @@
-0ff83447-1e3e-4875-9f9e-6ad3db144f75
-43751be6-9bcb-41fc-8cea-8e5907bb5f77
-a8c26a50-b9a2-477d-b592-3ce4a5687a50
+param dataStorageBlobRoleAssignmentName    = '0ff83447-1e3e-4875-9f9e-6ad3db144f75'
+param dataStorageTableRoleAssignmentName   = '43751be6-9bcb-41fc-8cea-8e5907bb5f77'
+-----------------------------------
+
+
+// ── Data storage role assignment names ────────────────────────────────────────
+// Set to existing GUIDs when manual role assignments are already present on the
+// data storage account, to avoid RoleAssignmentExists on re-deploy.
+// Leave empty on first deploy to new environments (Bicep derives GUIDs via guid()).
+param dataStorageBlobRoleAssignmentName string = ''
+param dataStorageTableRoleAssignmentName string = ''
+
+
+
+resource dataStorageBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: empty(dataStorageBlobRoleAssignmentName) ? guid(dataStorageRef.id, logicAppName, storageBlobDataContributorRoleId) : dataStorageBlobRoleAssignmentName
+  scope: dataStorageRef
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
+    principalId: logicApp.outputs.logicAppPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource dataStorageTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: empty(dataStorageTableRoleAssignmentName) ? guid(dataStorageRef.id, logicAppName, storageTableDataContributorRoleId) : dataStorageTableRoleAssignmentName
+  scope: dataStorageRef
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleId)
+    principalId: logicApp.outputs.logicAppPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+------------------------------------------------
+
+    scopes: [ resourceId('Microsoft.ServiceBus/namespaces/topics/subscriptions', serviceBusNamespaceName, 'sbt-dts-riskdocs-delivery', 'sbts-dts-riskdocs-delivery') ]
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
