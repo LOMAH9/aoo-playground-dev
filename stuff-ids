@@ -1,33 +1,18 @@
-// ── Logic App MI → data storage role assignments ──────────────────────────────
-// Blob: read/write staging, records, quarantine containers.
-// Table: read/write all DTS table entities.
+D:\a\1\s\infra\bicep\modules\alertRules.bicep(83,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
 
-var storageBlobDataContributorRoleId  = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
-var storageTableDataContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
-resource dataStorageRef 'Microsoft.Storage/storageAccounts@2023-01-01' existing = {
-  name: 'sta${locationCode}dtsdata${environment}'
-}
+WARNING: D:\a\1\s\infra\bicep\modules\alertRules.bicep(8,7) : Warning no-unused-params: Parameter "logicAppId" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-params]
 
-resource dataStorageBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(dataStorageRef.id, logicAppName, storageBlobDataContributorRoleId)
-  scope: dataStorageRef
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
-    principalId: logicApp.outputs.logicAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
+D:\a\1\s\infra\bicep\modules\alertRules.bicep(83,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
 
-resource dataStorageTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(dataStorageRef.id, logicAppName, storageTableDataContributorRoleId)
-  scope: dataStorageRef
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleId)
-    principalId: logicApp.outputs.logicAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
+
+ERROR: {"status":"Failed","error":{"code":"DeploymentFailed","target":"/subscriptions/21788d43-ca58-4712-93b1-c42e14ae6d6c/resourceGroups/rg-uks-dts-dev/providers/Microsoft.Resources/deployments/dts-bicep-dev-20261031133613","message":"At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details. Correlation ID: 42d562a8-584b-45da-8e30-748b984c3d78","details":[{"code":"ResourceDeploymentFailure","target":"/subscriptions/21788d43-ca58-4712-93b1-c42e14ae6d6c/resourceGroups/rg-uks-dts-dev/providers/Microsoft.Resources/deployments/logicAppStandard","message":"The resource write operation failed to complete successfully, because it reached terminal provisioning state 'Failed'.","details":[{"code":"DeploymentFailed","target":"/subscriptions/21788d43-ca58-4712-93b1-c42e14ae6d6c/resourceGroups/rg-uks-dts-dev/providers/Microsoft.Resources/deployments/logicAppStandard","message":"At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details. Correlation ID: 42d562a8-584b-45da-8e30-748b984c3d78","details":[{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is cb500e2df971480284216cc0bec0a990."},{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is f97fbf8706444dcaba0c78d6988070e1."},{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is 232bf33354ee466b89e621fc59f5826a."}]}]}]}}
+##[warning]Deployment failed - per-resource details:
+Resource          Error
+----------------  -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+logicAppStandard  At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details. Correlation ID: 42d562a8-584b-45da-8e30-748b984c3d78
+
+##[error]Script failed with exit code: 1
 
 
 
