@@ -1,41 +1,18 @@
-param dataStorageBlobRoleAssignmentName    = '0ff83447-1e3e-4875-9f9e-6ad3db144f75'
-param dataStorageTableRoleAssignmentName   = '43751be6-9bcb-41fc-8cea-8e5907bb5f77'
------------------------------------
+// ── Logic App Standard ─────────────────────────────────────────────────────────
+// AzureWebJobsStorage uses a connection string (same account as WEBSITE_CONTENTAZUREFILECONNECTIONSTRING).
+// Using the __accountName / __credential MI auth variants causes
+// IDistributedCacheProvider to register twice in the DI container (a known
+// extension-bundle bug in versions ≥1.49), leaving services.Count=2 / instances.Count=0
+// at startup. A single connection string registers exactly one provider.
+// WEBSITE_CONTENTAZUREFILECONNECTIONSTRING must remain a full connection string —
+// the App Service ARM provider enforces the exact setting name and rejects the
+// __accountName variant.
 
 
-// ── Data storage role assignment names ────────────────────────────────────────
-// Set to existing GUIDs when manual role assignments are already present on the
-// data storage account, to avoid RoleAssignmentExists on re-deploy.
-// Leave empty on first deploy to new environments (Bicep derives GUIDs via guid()).
-param dataStorageBlobRoleAssignmentName string = ''
-param dataStorageTableRoleAssignmentName string = ''
-
-
-
-resource dataStorageBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: empty(dataStorageBlobRoleAssignmentName) ? guid(dataStorageRef.id, logicAppName, storageBlobDataContributorRoleId) : dataStorageBlobRoleAssignmentName
-  scope: dataStorageRef
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
-    principalId: logicApp.outputs.logicAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource dataStorageTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: empty(dataStorageTableRoleAssignmentName) ? guid(dataStorageRef.id, logicAppName, storageTableDataContributorRoleId) : dataStorageTableRoleAssignmentName
-  scope: dataStorageRef
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRoleId)
-    principalId: logicApp.outputs.logicAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-------------------------------------------------
-
-    scopes: [ resourceId('Microsoft.ServiceBus/namespaces/topics/subscriptions', serviceBusNamespaceName, 'sbt-dts-riskdocs-delivery', 'sbts-dts-riskdocs-delivery') ]
-
-
+// Grants the Logic App MI read/write access to config storage for workflow
+// management operations (e.g. reading workflow definitions, artifact cache).
+// AzureWebJobsStorage itself uses a key connection string, so these are not
+// required for host startup — but retained for runtime MI operations.
 
 
 
