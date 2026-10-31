@@ -1,67 +1,27 @@
-
-// ── Config storage role assignment names (existing manual assignments) ─────────
-// These GUIDs match the role assignments already present on stauksdtsconfigdev.
-// Prevents RoleAssignmentExists errors on re-deploy.
-param configStorageBlobRoleAssignmentName  = '232bf333-54ee-466b-89e6-21fc59f5826a'
-param configStorageQueueRoleAssignmentName = 'cb500e2d-f971-4802-8421-6cc0bec0a990'
-param configStorageTableRoleAssignmentName = 'f97fbf87-0644-4dca-ba0c-78d6988070e1'
-
------------------------------------------------
-
-
-// ── Config storage role assignment names ──────────────────────────────────────
-// Set to existing GUIDs when manual role assignments are already present on the
-// config storage account, to avoid RoleAssignmentExists on re-deploy.
-// Leave empty on first deploy to new environments (Bicep derives GUIDs via guid()).
-param configStorageBlobRoleAssignmentName string = ''
-param configStorageQueueRoleAssignmentName string = ''
-param configStorageTableRoleAssignmentName string = ''
-
-    configStorageBlobRoleAssignmentName:  configStorageBlobRoleAssignmentName
-    configStorageQueueRoleAssignmentName: configStorageQueueRoleAssignmentName
-    configStorageTableRoleAssignmentName: configStorageTableRoleAssignmentName
--------------------------------------------------------------------------------------
-
-// ── Config storage role assignment names ──────────────────────────────────────
-// Leave empty on first deploy to new environments (Bicep derives GUIDs via guid()).
-// Set to the existing assignment GUIDs when pre-existing manual assignments are
-// present, to prevent RoleAssignmentExists errors on re-deploy.
-param configStorageBlobRoleAssignmentName string = ''
-param configStorageQueueRoleAssignmentName string = ''
-param configStorageTableRoleAssignmentName string = ''
+Bicep deployment
+  Deployment name       : dts-bicep-dev-20261031143024
+  Resource group        : rg-uks-dts-dev
+  Shared resource group : rg-uks-integrationplatform-dev
+  Service Bus namespace : sbns-uks-integrationplatform-dev
+  APIM base URL         : https://apim-uks-integrationplatform-dev.azure-api.net
+  App Insights name     : appi-uks-integrationplatform-dev
+  Key Vault name        : kv-uks-integration-dev
+  Template              : infra/bicep/main.bicep
+  Parameters            : infra/bicep/dev.parameters.bicepparam
+WARNING: D:\a\1\s\infra\bicep\modules\alertRules.bicep(85,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
 
 
-resource configStorageBlobRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: empty(configStorageBlobRoleAssignmentName) ? guid(configStorage.id, logicApp.id, storageBlobDataContributorId) : configStorageBlobRoleAssignmentName
-  scope: configStorage
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorId)
-    principalId: logicApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource configStorageQueueRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: empty(configStorageQueueRoleAssignmentName) ? guid(configStorage.id, logicApp.id, storageQueueDataContributorId) : configStorageQueueRoleAssignmentName
-  scope: configStorage
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageQueueDataContributorId)
-    principalId: logicApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource configStorageTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: empty(configStorageTableRoleAssignmentName) ? guid(configStorage.id, logicApp.id, storageTableDataContributorId) : configStorageTableRoleAssignmentName
-  scope: configStorage
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorId)
-    principalId: logicApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+WARNING: D:\a\1\s\infra\bicep\modules\alertRules.bicep(85,10) : Warning no-unused-existing-resources: Existing resource "deliverySub" is declared but never used. [https://aka.ms/bicep/linter-diagnostics#no-unused-existing-resources]
 
 
+ERROR: {"status":"Failed","error":{"code":"DeploymentFailed","target":"/subscriptions/21788d43-ca58-4712-93b1-c42e14ae6d6c/resourceGroups/rg-uks-dts-dev/providers/Microsoft.Resources/deployments/dts-bicep-dev-20261031143024","message":"At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details. Correlation ID: 97f6dbbf-91f9-4fd6-86fe-59dd9662a02a","details":[{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is 43751be69bcb41fc8cea8e5907bb5f77."},{"code":"RoleAssignmentExists","message":"The role assignment already exists. The ID of the existing role assignment is 0ff834471e3e48759f9e6ad3db144f75."}]}}
+##[warning]Deployment failed - per-resource details:
+Resource                              Error
+------------------------------------  ---------------------------------------------------------------------------------------------------------------
+a81a72d0-7add-5afe-b247-7bd057025451  The role assignment already exists. The ID of the existing role assignment is 43751be69bcb41fc8cea8e5907bb5f77.
+62ead463-20ad-53f1-8248-3120bc4200f6  The role assignment already exists. The ID of the existing role assignment is 0ff834471e3e48759f9e6ad3db144f75.
+
+##[error]Script failed with exit code: 1
 ----------------------------------
 
 
