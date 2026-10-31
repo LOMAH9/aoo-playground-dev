@@ -1,3 +1,1102 @@
 b1c6d24c-f3ab-403b-876b-67a65ddafb2a
 381a7ce7-a8e7-4ce6-9e5f-1cb6e1f48133
 "code": "const JSZip = require('jszip');\nconst body = workflowContext.actions.HTTP_Export_Pdf_Bundle.outputs.body;\nconst b64 = (body && body['$content']) ? body['$content'] : body;\nconst buf = Buffer.from(b64, 'base64');\nconst zip = await JSZip.loadAsync(buf);\nconst files = [];\nconst fileNames = Object.keys(zip.files);\nfor (let i = 0; i < fileNames.length; i++) {\n  const name = fileNames[i];\n  const entry = zip.files[name];\n  if (!entry.dir) {\n    const content = await entry.async('base64');\n    files.push({ name: name.replace(/^.*[\\/\\\\]/, ''), content: content, size: Buffer.from(content, 'base64').length });\n  }\n}\nreturn files;",
+
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "HTTP_Trigger": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "required": [
+                            "function",
+                            "sourceConfigCode",
+                            "correlationId"
+                        ],
+                        "properties": {
+                            "function": {
+                                "type": "string",
+                                "enum": [
+                                    "GetDocumentsMetadata",
+                                    "UploadFromPath",
+                                    "DownloadRiskBundle"
+                                ]
+                            },
+                            "sourceConfigCode": {
+                                "type": "string"
+                            },
+                            "workloadId": {
+                                "type": "string"
+                            },
+                            "watermarkFrom": {
+                                "type": "string"
+                            },
+                            "maxPagesPerRun": {
+                                "type": "integer"
+                            },
+                            "filters": {
+                                "type": "object",
+                                "properties": {
+                                    "extDocStatusesCsv": {
+                                        "type": "string"
+                                    },
+                                    "extDocumentTypesCsv": {
+                                        "type": "string"
+                                    },
+                                    "umrSearch": {
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            "externalId": {
+                                "type": "string"
+                            },
+                            "documentId": {
+                                "type": "string"
+                            },
+                            "parentDocumentId": {
+                                "type": "string"
+                            },
+                            "revision": {
+                                "type": "string"
+                            },
+                            "fileName": {
+                                "type": "string"
+                            },
+                            "contentType": {
+                                "type": "string"
+                            },
+                            "digest": {
+                                "type": "string"
+                            },
+                            "externalType": {
+                                "type": "string"
+                            },
+                            "containerDirectoryPath": {
+                                "type": "string"
+                            },
+                            "sourceBlobPath": {
+                                "type": "string"
+                            },
+                            "correlationId": {
+                                "type": "string"
+                            },
+                            "documents": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "documentId": {
+                                            "type": "string"
+                                        },
+                                        "externalType": {
+                                            "type": "string"
+                                        },
+                                        "fileName": {
+                                            "type": "string"
+                                        },
+                                        "contentType": {
+                                            "type": "string"
+                                        },
+                                        "digest": {
+                                            "type": "string"
+                                        },
+                                        "revision": {
+                                            "type": "string"
+                                        },
+                                        "parentDocumentId": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "actions": {
+            "INIT_Variables": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "riskItems",
+                            "type": "array",
+                            "value": []
+                        },
+                        {
+                            "name": "apiBaseUrl",
+                            "type": "string",
+                            "value": "@{concat(coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::apim_base_url')), appsetting('apim_base_url')), '/', coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_base_uri')), appsetting('whitespace_api_base_uri')))}"
+                        },
+                        {
+                            "name": "apimSubKey",
+                            "type": "string",
+                            "value": "@{coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_apim_subscription_key')), appsetting('whitespace_api_apim_subscription_key'))}"
+                        },
+                        {
+                            "name": "correlationIdHeader",
+                            "type": "string",
+                            "value": "@{appsetting('correlation_id_header')}"
+                        },
+                        {
+                            "name": "correlationId",
+                            "type": "string",
+                            "value": "@{coalesce(triggerOutputs()?['headers']?[appsetting('correlation_id_header')], triggerBody()?['correlationId'], '')}"
+                        },
+                        {
+                            "name": "whitespaceAudienceId",
+                            "type": "string",
+                            "value": "@{coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::', 'whitespace_api_audience_id')), appsetting('whitespace_api_audience_id'))}"
+                        },
+                        {
+                            "name": "uploadedFiles",
+                            "type": "array",
+                            "value": []
+                        },
+                        {
+                            "name": "pageMoreItems",
+                            "type": "boolean",
+                            "value": true
+                        },
+                        {
+                            "name": "pageNextKey",
+                            "type": "string"
+                        },
+                        {
+                            "name": "watermarkToInternal",
+                            "type": "string"
+                        },
+                        {
+                            "name": "pagesReadCount",
+                            "type": "integer",
+                            "value": 0
+                        },
+                        {
+                            "name": "currentDocuments",
+                            "type": "array",
+                            "value": []
+                        },
+                        {
+                            "name": "matchedDocument",
+                            "type": "object",
+                            "value": {}
+                        },
+                        {
+                            "name": "filesToStage",
+                            "type": "array",
+                            "value": []
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "IF_Assert_CorrelationId_Consistent": {
+                "type": "If",
+                "expression": {
+                    "and": [
+                        {
+                            "not": {
+                                "empty": [
+                                    "@coalesce(triggerOutputs()?['headers']?[appsetting('correlation_id_header')], '')"
+                                ]
+                            }
+                        },
+                        {
+                            "not": {
+                                "empty": [
+                                    "@coalesce(triggerBody()?['correlationId'], '')"
+                                ]
+                            }
+                        },
+                        {
+                            "not": {
+                                "equals": [
+                                    "@triggerOutputs()?['headers']?[appsetting('correlation_id_header')]",
+                                    "@triggerBody()?['correlationId']"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                "actions": {
+                    "Response_CorrelationId_Mismatch": {
+                        "type": "Response",
+                        "inputs": {
+                            "statusCode": 400,
+                            "body": {
+                                "error": "correlationId in request header and body must match when both are provided"
+                            }
+                        }
+                    },
+                    "Terminate_CorrelationId_Mismatch": {
+                        "type": "Terminate",
+                        "inputs": {
+                            "runStatus": "Failed",
+                            "runError": {
+                                "code": "CorrelationIdMismatch",
+                                "message": "correlationId header and body values differ"
+                            }
+                        },
+                        "runAfter": {
+                            "Response_CorrelationId_Mismatch": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "else": {
+                    "actions": {}
+                },
+                "runAfter": {
+                    "INIT_Variables": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "SWITCH_Function": {
+                "type": "Switch",
+                "expression": "@triggerBody()?['function']",
+                "default": {
+                    "actions": {
+                        "Response_Unsupported_Function": {
+                            "type": "Response",
+                            "inputs": {
+                                "statusCode": 400,
+                                "body": {
+                                    "error": "@{concat('Unsupported function: ', triggerBody()?['function'])}"
+                                }
+                            }
+                        }
+                    }
+                },
+                "cases": {
+                    "DownloadRiskBundle": {
+                        "actions": {
+                            "SET_Reset_UploadedFiles": {
+                                "type": "SetVariable",
+                                "inputs": {
+                                    "name": "uploadedFiles",
+                                    "value": []
+                                }
+                            },
+                            "SET_Reset_FilesToStage": {
+                                "type": "SetVariable",
+                                "inputs": {
+                                    "name": "filesToStage",
+                                    "value": []
+                                },
+                                "runAfter": {
+                                    "SET_Reset_UploadedFiles": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "FILTER_Attachment_Documents": {
+                                "type": "Query",
+                                "inputs": {
+                                    "from": "@triggerBody()?['documents']",
+                                    "where": "@equals(item()?['externalType'], 'RWAttachmentCollection')"
+                                },
+                                "runAfter": {
+                                    "SET_Reset_FilesToStage": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "HTTP_Export_Pdf_Bundle": {
+                                "type": "Http",
+                                "inputs": {
+                                    "uri": "@{concat(variables('apiBaseUrl'), '/export/pdf/', triggerBody()?['externalId'])}",
+                                    "method": "POST",
+                                    "headers": {
+                                        "@{variables('correlationIdHeader')}": "@{variables('correlationId')}",
+                                        "Ocp-Apim-Subscription-Key": "@{variables('apimSubKey')}",
+                                        "Content-Type": "application/json"
+                                    },
+                                    "body": {},
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity",
+                                        "audience": "@variables('whitespaceAudienceId')"
+                                    },
+                                    "retryPolicy": {
+                                        "type": "exponential",
+                                        "count": 4,
+                                        "interval": "PT30S",
+                                        "maximumInterval": "PT5M"
+                                    }
+                                },
+                                "runAfter": {
+                                    "FILTER_Attachment_Documents": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "IF_Exported_File_Is_Zip": {
+                                "type": "If",
+                                "expression": {
+                                    "and": [
+                                        {
+                                            "contains": [
+                                                "@toLower(coalesce(outputs('HTTP_Export_Pdf_Bundle')?['headers']?['Content-Type'], ''))",
+                                                "zip"
+                                            ]
+                                        }
+                                    ]
+                                },
+                                "actions": {
+                                    "CODE_Extract_Zip_Files": {
+                                        "type": "JavaScriptCode",
+                                        "inputs": {
+                                            "code": "const JSZip = require('jszip');\nconst body = workflowContext.actions.HTTP_Export_Pdf_Bundle.outputs.body;\nconst b64 = (body && body['$content']) ? body['$content'] : body;\nconst buf = Buffer.from(b64, 'base64');\nconst zip = await JSZip.loadAsync(buf);\nconst files = [];\nconst fileNames = Object.keys(zip.files);\nfor (let i = 0; i < fileNames.length; i++) {\n  const name = fileNames[i];\n  const entry = zip.files[name];\n  if (!entry.dir) {\n    const content = await entry.async('base64');\n    files.push({ name: name.replace(/^.*[\\/\\\\]/, ''), content: content, size: Buffer.from(content, 'base64').length });\n  }\n}\nreturn files;",
+                                            "explicitDependencies": {
+                                                "actions": [
+                                                    "HTTP_Export_Pdf_Bundle"
+                                                ]
+                                            }
+                                        }
+                                    },
+                                    "PARSE_Extracted_Files": {
+                                        "type": "ParseJson",
+                                        "inputs": {
+                                            "content": "@outputs('CODE_Extract_Zip_Files')?['body']",
+                                            "schema": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "name": {
+                                                            "type": "string"
+                                                        },
+                                                        "content": {
+                                                            "type": "string"
+                                                        },
+                                                        "size": {
+                                                            "type": "integer"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "CODE_Extract_Zip_Files": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    },
+                                    "FOREACH_Upload_Extracted_File": {
+                                        "type": "Foreach",
+                                        "foreach": "@body('PARSE_Extracted_Files')",
+                                        "actions": {
+                                            "COMPOSE_File_Staging_Path": {
+                                                "type": "Compose",
+                                                "inputs": "@{concat(triggerBody()?['containerDirectoryPath'], '/', items('FOREACH_Upload_Extracted_File')?['name'])}"
+                                            },
+                                            "COMPOSE_Current_FileName": {
+                                                "type": "Compose",
+                                                "inputs": "@{items('FOREACH_Upload_Extracted_File')?['name']}",
+                                                "runAfter": {
+                                                    "COMPOSE_File_Staging_Path": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            },
+                                            "SET_Reset_MatchedDocument": {
+                                                "type": "SetVariable",
+                                                "inputs": {
+                                                    "name": "matchedDocument",
+                                                    "value": {}
+                                                },
+                                                "runAfter": {
+                                                    "COMPOSE_Current_FileName": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            },
+                                            "FOREACH_Find_Matching_Doc": {
+                                                "type": "Foreach",
+                                                "foreach": "@triggerBody()?['documents']",
+                                                "actions": {
+                                                    "IF_Doc_Filename_Matches": {
+                                                        "type": "If",
+                                                        "expression": {
+                                                            "and": [
+                                                                {
+                                                                    "equals": [
+                                                                        "@items('FOREACH_Find_Matching_Doc')?['fileName']",
+                                                                        "@outputs('COMPOSE_Current_FileName')"
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        },
+                                                        "actions": {
+                                                            "SET_Matched_Document": {
+                                                                "type": "SetVariable",
+                                                                "inputs": {
+                                                                    "name": "matchedDocument",
+                                                                    "value": "@items('FOREACH_Find_Matching_Doc')"
+                                                                }
+                                                            }
+                                                        },
+                                                        "else": {
+                                                            "actions": {}
+                                                        }
+                                                    }
+                                                },
+                                                "runAfter": {
+                                                    "SET_Reset_MatchedDocument": [
+                                                        "Succeeded"
+                                                    ]
+                                                },
+                                                "operationOptions": "Sequential"
+                                            },
+                                            "APPEND_File_To_Stage": {
+                                                "type": "AppendToArrayVariable",
+                                                "inputs": {
+                                                    "name": "filesToStage",
+                                                    "value": "@createObject('content', items('FOREACH_Upload_Extracted_File')?['content'], 'blobPath', outputs('COMPOSE_File_Staging_Path'), 'partnerdigest', variables('matchedDocument')?['digest'], 'partnerrevision', variables('matchedDocument')?['revision'], 'externalType', variables('matchedDocument')?['externalType'], 'documentId', variables('matchedDocument')?['documentId'], 'originalFileName', items('FOREACH_Upload_Extracted_File')?['name'], 'sizeBytes', items('FOREACH_Upload_Extracted_File')?['size'], 'contentType', variables('matchedDocument')?['contentType'], 'digest', variables('matchedDocument')?['digest'])"
+                                                },
+                                                "runAfter": {
+                                                    "FOREACH_Find_Matching_Doc": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "PARSE_Extracted_Files": [
+                                                "Succeeded"
+                                            ]
+                                        },
+                                        "operationOptions": "Sequential"
+                                    }
+                                },
+                                "else": {
+                                    "actions": {
+                                        "COMPOSE_Document_File_Name": {
+                                            "type": "Compose",
+                                            "inputs": "@{last(split(outputs('HTTP_Export_Pdf_Bundle')?['headers']?['Content-Disposition'], 'filename='))}"
+                                        },
+                                        "COMPOSE_Document_Staging_Path": {
+                                            "type": "Compose",
+                                            "inputs": "@concat(triggerBody()?['containerDirectoryPath'], '/', trim(replace(replace(outputs('COMPOSE_Document_File_Name'), '\"', ''), '''', '')))",
+                                            "runAfter": {
+                                                "COMPOSE_Document_File_Name": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        },
+                                        "APPEND_Document_To_Stage": {
+                                            "type": "AppendToArrayVariable",
+                                            "inputs": {
+                                                "name": "filesToStage",
+                                                "value": "@createObject('content', body('HTTP_Export_Pdf_Bundle')?['$content'], 'blobPath', outputs('COMPOSE_Document_Staging_Path'), 'partnerdigest', first(triggerBody()?['documents'])?['digest'], 'partnerrevision', first(triggerBody()?['documents'])?['revision'], 'externalType', first(triggerBody()?['documents'])?['externalType'], 'documentId', first(triggerBody()?['documents'])?['documentId'], 'originalFileName', outputs('COMPOSE_Document_File_Name'), 'sizeBytes', int(coalesce(outputs('HTTP_Export_Pdf_Bundle')?['headers']?['Content-Length'], '0')), 'contentType', first(triggerBody()?['documents'])?['contentType'], 'digest', first(triggerBody()?['documents'])?['digest'])"
+                                            },
+                                            "runAfter": {
+                                                "COMPOSE_Document_Staging_Path": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        }
+                                    }
+                                },
+                                "runAfter": {
+                                    "HTTP_Export_Pdf_Bundle": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "IF_Risk_Documents_List_Contains_Attachments": {
+                                "type": "If",
+                                "expression": {
+                                    "and": [
+                                        {
+                                            "not": {
+                                                "empty": [
+                                                    "@body('FILTER_Attachment_Documents')"
+                                                ]
+                                            }
+                                        }
+                                    ]
+                                },
+                                "actions": {
+                                    "HTTP_Get_Attachments_Metadata": {
+                                        "type": "Http",
+                                        "inputs": {
+                                            "uri": "@{concat(variables('apiBaseUrl'), '/api/attachments/', triggerBody()?['externalId'])}",
+                                            "method": "GET",
+                                            "headers": {
+                                                "@{variables('correlationIdHeader')}": "@{variables('correlationId')}",
+                                                "Ocp-Apim-Subscription-Key": "@{variables('apimSubKey')}"
+                                            },
+                                            "authentication": {
+                                                "type": "ManagedServiceIdentity",
+                                                "audience": "@variables('whitespaceAudienceId')"
+                                            },
+                                            "retryPolicy": {
+                                                "type": "exponential",
+                                                "count": 4,
+                                                "interval": "PT30S",
+                                                "maximumInterval": "PT5M"
+                                            }
+                                        }
+                                    },
+                                    "PARSE_Attachments_Metadata": {
+                                        "type": "ParseJson",
+                                        "inputs": {
+                                            "content": "@body('HTTP_Get_Attachments_Metadata')",
+                                            "schema": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "identifier": {
+                                                            "type": "string"
+                                                        },
+                                                        "parentDocID": {
+                                                            "type": "string"
+                                                        },
+                                                        "content_type": {
+                                                            "type": "string"
+                                                        },
+                                                        "digest": {
+                                                            "type": "string"
+                                                        },
+                                                        "length": {
+                                                            "type": "integer"
+                                                        },
+                                                        "version": {
+                                                            "type": "integer"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "HTTP_Get_Attachments_Metadata": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    },
+                                    "FOREACH_Download_Attachment": {
+                                        "type": "Foreach",
+                                        "foreach": "@body('PARSE_Attachments_Metadata')",
+                                        "actions": {
+                                            "HTTP_Download_Attachment": {
+                                                "type": "Http",
+                                                "inputs": {
+                                                    "uri": "@{concat(variables('apiBaseUrl'), '/api/attachments/', items('FOREACH_Download_Attachment')?['parentDocID'], '/', items('FOREACH_Download_Attachment')?['identifier'])}",
+                                                    "method": "GET",
+                                                    "headers": {
+                                                        "@{variables('correlationIdHeader')}": "@{variables('correlationId')}",
+                                                        "Ocp-Apim-Subscription-Key": "@{variables('apimSubKey')}"
+                                                    },
+                                                    "authentication": {
+                                                        "type": "ManagedServiceIdentity",
+                                                        "audience": "@variables('whitespaceAudienceId')"
+                                                    },
+                                                    "retryPolicy": {
+                                                        "type": "exponential",
+                                                        "count": 4,
+                                                        "interval": "PT30S",
+                                                        "maximumInterval": "PT5M"
+                                                    }
+                                                }
+                                            },
+                                            "APPEND_Attachment_To_Stage": {
+                                                "type": "AppendToArrayVariable",
+                                                "inputs": {
+                                                    "name": "filesToStage",
+                                                    "value": "@createObject('content', body('HTTP_Download_Attachment')?['$content'], 'blobPath', concat(triggerBody()?['containerDirectoryPath'], '/', items('FOREACH_Download_Attachment')?['identifier']), 'partnerdigest', items('FOREACH_Download_Attachment')?['digest'], 'partnerrevision', string(items('FOREACH_Download_Attachment')?['version']), 'externalType', 'RWAttachmentCollection', 'documentId', concat(triggerBody()?['externalId'], '|RWAttachmentCollection'), 'originalFileName', items('FOREACH_Download_Attachment')?['identifier'], 'sizeBytes', items('FOREACH_Download_Attachment')?['length'], 'contentType', items('FOREACH_Download_Attachment')?['content_type'], 'digest', items('FOREACH_Download_Attachment')?['digest'])"
+                                                },
+                                                "runAfter": {
+                                                    "HTTP_Download_Attachment": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "PARSE_Attachments_Metadata": [
+                                                "Succeeded"
+                                            ]
+                                        },
+                                        "operationOptions": "Sequential"
+                                    }
+                                },
+                                "else": {
+                                    "actions": {}
+                                },
+                                "runAfter": {
+                                    "FILTER_Attachment_Documents": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "FOREACH_Stage_Document": {
+                                "type": "Foreach",
+                                "foreach": "@variables('filesToStage')",
+                                "actions": {
+                                    "BLOB_Upload_Document_To_Staging": {
+                                        "type": "ServiceProvider",
+                                        "inputs": {
+                                            "parameters": {
+                                                "containerName": "@appsetting('blob_staging_container')",
+                                                "blobName": "@items('FOREACH_Stage_Document')?['blobPath']",
+                                                "content": "@base64ToBinary(items('FOREACH_Stage_Document')?['content'])",
+                                                "overwrite": true,
+                                                "metadata": {
+                                                    "partnerdigest": "@{items('FOREACH_Stage_Document')?['partnerdigest']}",
+                                                    "partnerrevision": "@{items('FOREACH_Stage_Document')?['partnerrevision']}",
+                                                    "workloadcode": "@{triggerBody()?['workloadId']}",
+                                                    "partnerexternalid": "@{triggerBody()?['externalId']}",
+                                                    "doctype": "@{items('FOREACH_Stage_Document')?['externalType']}"
+                                                }
+                                            },
+                                            "serviceProviderConfiguration": {
+                                                "connectionName": "azureBlob",
+                                                "operationId": "uploadBlob",
+                                                "serviceProviderId": "/serviceProviders/AzureBlob"
+                                            }
+                                        }
+                                    },
+                                    "APPEND_Uploaded_File": {
+                                        "type": "AppendToArrayVariable",
+                                        "inputs": {
+                                            "name": "uploadedFiles",
+                                            "value": "@createObject('documentId', items('FOREACH_Stage_Document')?['documentId'], 'stagingBlobPath', items('FOREACH_Stage_Document')?['blobPath'], 'originalFileName', items('FOREACH_Stage_Document')?['originalFileName'], 'sizeBytes', items('FOREACH_Stage_Document')?['sizeBytes'], 'contentType', items('FOREACH_Stage_Document')?['contentType'], 'digest', items('FOREACH_Stage_Document')?['digest'])"
+                                        },
+                                        "runAfter": {
+                                            "BLOB_Upload_Document_To_Staging": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    }
+                                },
+                                "runAfter": {
+                                    "IF_Exported_File_Is_Zip": [
+                                        "Succeeded"
+                                    ],
+                                    "IF_Risk_Documents_List_Contains_Attachments": [
+                                        "Succeeded"
+                                    ]
+                                },
+                                "operationOptions": "Sequential"
+                            },
+                            "Response_DownloadRiskBundle": {
+                                "type": "Response",
+                                "inputs": {
+                                    "statusCode": 200,
+                                    "body": "@variables('uploadedFiles')"
+                                },
+                                "runAfter": {
+                                    "FOREACH_Stage_Document": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "Response_DownloadRiskBundle_Error": {
+                                "type": "Response",
+                                "inputs": {
+                                    "statusCode": 500,
+                                    "body": {
+                                        "error": "DownloadRiskBundle failed",
+                                        "workloadId": "@triggerBody()?['workloadId']",
+                                        "externalId": "@triggerBody()?['externalId']"
+                                    }
+                                },
+                                "runAfter": {
+                                    "HTTP_Export_Pdf_Bundle": [
+                                        "Failed",
+                                        "TimedOut"
+                                    ],
+                                    "IF_Exported_File_Is_Zip": [
+                                        "Failed"
+                                    ],
+                                    "IF_Risk_Documents_List_Contains_Attachments": [
+                                        "Failed"
+                                    ],
+                                    "FOREACH_Stage_Document": [
+                                        "Failed"
+                                    ]
+                                }
+                            }
+                        },
+                        "case": "DownloadRiskBundle"
+                    },
+                    "UploadFromPath": {
+                        "actions": {
+                            "Response_UploadFromPath_NotImplemented": {
+                                "type": "Response",
+                                "inputs": {
+                                    "statusCode": 501,
+                                    "body": {
+                                        "error": "UploadFromPath is not implemented for the Whitespace partner API source type"
+                                    }
+                                }
+                            }
+                        },
+                        "case": "UploadFromPath"
+                    },
+                    "GetDocumentsMetadata": {
+                        "actions": {
+                            "UNTIL_All_Pages": {
+                                "type": "Until",
+                                "expression": "@or(equals(variables('pageMoreItems'), false), greaterOrEquals(variables('pagesReadCount'), coalesce(triggerBody()?['maxPagesPerRun'], 50)))",
+                                "limit": {
+                                    "count": 100,
+                                    "timeout": "PT55M"
+                                },
+                                "actions": {
+                                    "COMPOSE_Page_URI": {
+                                        "type": "Compose",
+                                        "inputs": "@if(equals(variables('pageNextKey'), ''), concat(variables('apiBaseUrl'), '/api/summary'), concat(variables('apiBaseUrl'), '/api/summary?last=', encodeUriComponent(split(variables('pageNextKey'), '|')[0]), '&from=', encodeUriComponent(split(variables('pageNextKey'), '|')[1])))"
+                                    },
+                                    "COMPOSE_Page_Request_Body": {
+                                        "type": "Compose",
+                                        "inputs": "@if(empty(coalesce(triggerBody()?['filters']?['umrSearch'], '')), createObject('statuses', split(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], 'Signed,Endorsement'), ',')), createObject('statuses', split(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], 'Signed,Endorsement'), ','), 'umrSearch', triggerBody()?['filters']?['umrSearch']))"
+                                    },
+                                    "HTTP_Get_Risks_Summary_Page": {
+                                        "type": "Http",
+                                        "inputs": {
+                                            "uri": "@outputs('COMPOSE_Page_URI')",
+                                            "method": "POST",
+                                            "headers": {
+                                                "@{variables('correlationIdHeader')}": "@{variables('correlationId')}",
+                                                "Ocp-Apim-Subscription-Key": "@{variables('apimSubKey')}",
+                                                "Content-Type": "application/json",
+                                                "Accept": "application/json"
+                                            },
+                                            "body": "@outputs('COMPOSE_Page_Request_Body')",
+                                            "authentication": {
+                                                "type": "ManagedServiceIdentity",
+                                                "audience": "@variables('whitespaceAudienceId')"
+                                            },
+                                            "retryPolicy": {
+                                                "type": "exponential",
+                                                "count": 6,
+                                                "interval": "PT5S",
+                                                "maximumInterval": "PT2M"
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "COMPOSE_Page_URI": [
+                                                "Succeeded"
+                                            ],
+                                            "COMPOSE_Page_Request_Body": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    },
+                                    "PARSE_Page_Result": {
+                                        "type": "ParseJson",
+                                        "inputs": {
+                                            "content": "@body('HTTP_Get_Risks_Summary_Page')",
+                                            "schema": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "rootID": {
+                                                            "type": "string"
+                                                        },
+                                                        "updatedAt": {
+                                                            "type": "string"
+                                                        },
+                                                        "status": {
+                                                            "type": "string"
+                                                        },
+                                                        "docs": {
+                                                            "type": "array",
+                                                            "items": {
+                                                                "type": "object",
+                                                                "properties": {
+                                                                    "id": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "umr": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "insuredName": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "inceptionDate": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "type": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "rev": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "placementType": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "status": {
+                                                                        "type": "string"
+                                                                    },
+                                                                    "lastUpdatedAt": {
+                                                                        "type": "string"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "HTTP_Get_Risks_Summary_Page": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    },
+                                    "IF_Set_Watermark_Initial": {
+                                        "type": "If",
+                                        "expression": {
+                                            "and": [
+                                                {
+                                                    "equals": [
+                                                        "@variables('pagesReadCount')",
+                                                        0
+                                                    ]
+                                                },
+                                                {
+                                                    "greater": [
+                                                        "@length(body('PARSE_Page_Result'))",
+                                                        0
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "actions": {
+                                            "SET_WatermarkTo_Initial": {
+                                                "type": "SetVariable",
+                                                "inputs": {
+                                                    "name": "watermarkToInternal",
+                                                    "value": "@first(body('PARSE_Page_Result'))?['updatedAt']"
+                                                }
+                                            }
+                                        },
+                                        "else": {
+                                            "actions": {}
+                                        },
+                                        "runAfter": {
+                                            "PARSE_Page_Result": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    },
+                                    "FOREACH_Page_Risk": {
+                                        "type": "Foreach",
+                                        "foreach": "@body('PARSE_Page_Result')",
+                                        "actions": {
+                                            "SET_Reset_CurrentDocuments": {
+                                                "type": "SetVariable",
+                                                "inputs": {
+                                                    "name": "currentDocuments",
+                                                    "value": []
+                                                }
+                                            },
+                                            "FOREACH_Doc_Filter": {
+                                                "type": "Foreach",
+                                                "foreach": "@coalesce(items('FOREACH_Page_Risk')?['docs'], createArray())",
+                                                "actions": {
+                                                    "IF_Doc_Matches_Filters": {
+                                                        "type": "If",
+                                                        "expression": {
+                                                            "and": [
+                                                                {
+                                                                    "or": [
+                                                                        {
+                                                                            "empty": [
+                                                                                "@coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], '')"
+                                                                            ]
+                                                                        },
+                                                                        {
+                                                                            "contains": [
+                                                                                "@concat(',', coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], ''), ',')",
+                                                                                "@concat(',', items('FOREACH_Doc_Filter')?['status'], ',')"
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    "or": [
+                                                                        {
+                                                                            "empty": [
+                                                                                "@coalesce(triggerBody()?['filters']?['extDocumentTypesCsv'], '')"
+                                                                            ]
+                                                                        },
+                                                                        {
+                                                                            "contains": [
+                                                                                "@concat(',', coalesce(triggerBody()?['filters']?['extDocumentTypesCsv'], ''), ',')",
+                                                                                "@concat(',', items('FOREACH_Doc_Filter')?['type'], ',')"
+                                                                            ]
+                                                                        }
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        },
+                                                        "actions": {
+                                                            "APPEND_Api_Doc": {
+                                                                "type": "AppendToArrayVariable",
+                                                                "inputs": {
+                                                                    "name": "currentDocuments",
+                                                                    "value": "@createObject('documentId', concat(items('FOREACH_Page_Risk')?['rootID'], '|', items('FOREACH_Doc_Filter')?['type']), 'externalId', items('FOREACH_Doc_Filter')?['id'], 'externalType', items('FOREACH_Doc_Filter')?['type'], 'documentKind', if(equals(items('FOREACH_Doc_Filter')?['type'], 'RWAttachmentCollection'), 'Attachment', if(equals(items('FOREACH_Doc_Filter')?['status'], 'Endorsement'), 'Endorsement', 'Submission')), 'placementType', items('FOREACH_Doc_Filter')?['placementType'], 'parentDocumentId', items('FOREACH_Page_Risk')?['rootID'], 'revision', coalesce(items('FOREACH_Doc_Filter')?['rev'], '1'), 'fileName', if(equals(items('FOREACH_Doc_Filter')?['type'], 'RWAttachmentCollection'), null, concat(replace(replace(coalesce(items('FOREACH_Doc_Filter')?['umr'], items('FOREACH_Page_Risk')?['rootID']), '/', '_'), ':', '-'), '.pdf')), 'digest', null, 'contentType', if(equals(items('FOREACH_Doc_Filter')?['type'], 'RWAttachmentCollection'), null, 'application/pdf'), 'sizeBytes', 0, 'status', items('FOREACH_Doc_Filter')?['status'], 'lastUpdatedAt', items('FOREACH_Doc_Filter')?['lastUpdatedAt'])"
+                                                                }
+                                                            }
+                                                        },
+                                                        "else": {
+                                                            "actions": {}
+                                                        }
+                                                    }
+                                                },
+                                                "runAfter": {
+                                                    "SET_Reset_CurrentDocuments": [
+                                                        "Succeeded"
+                                                    ]
+                                                },
+                                                "operationOptions": "Sequential"
+                                            },
+                                            "COMPOSE_Risk_Item": {
+                                                "type": "Compose",
+                                                "inputs": {
+                                                    "externalId": "@items('FOREACH_Page_Risk')?['rootID']",
+                                                    "umr": "@items('FOREACH_Page_Risk')?['docs']?[0]?['umr']",
+                                                    "insuredName": "@items('FOREACH_Page_Risk')?['docs']?[0]?['insuredName']",
+                                                    "inceptionDate": "@items('FOREACH_Page_Risk')?['docs']?[0]?['inceptionDate']",
+                                                    "updatedAt": "@items('FOREACH_Page_Risk')?['updatedAt']",
+                                                    "documents": "@variables('currentDocuments')"
+                                                },
+                                                "runAfter": {
+                                                    "FOREACH_Doc_Filter": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            },
+                                            "SET_Append_Risk": {
+                                                "type": "AppendToArrayVariable",
+                                                "inputs": {
+                                                    "name": "riskItems",
+                                                    "value": "@outputs('COMPOSE_Risk_Item')"
+                                                },
+                                                "runAfter": {
+                                                    "COMPOSE_Risk_Item": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            }
+                                        },
+                                        "runAfter": {
+                                            "IF_Set_Watermark_Initial": [
+                                                "Succeeded"
+                                            ]
+                                        },
+                                        "operationOptions": "Sequential"
+                                    },
+                                    "SET_More_Pages": {
+                                        "type": "SetVariable",
+                                        "inputs": {
+                                            "name": "pageMoreItems",
+                                            "value": "@and(equals(length(body('PARSE_Page_Result')), 60), greaterOrEquals(ticks(last(body('PARSE_Page_Result'))?['updatedAt']), ticks(coalesce(triggerBody()?['watermarkFrom'], '2000-01-01T00:00:00Z'))))"
+                                        },
+                                        "runAfter": {
+                                            "FOREACH_Page_Risk": [
+                                                "Succeeded",
+                                                "Failed"
+                                            ]
+                                        }
+                                    },
+                                    "SET_Page_Next_Key": {
+                                        "type": "SetVariable",
+                                        "inputs": {
+                                            "name": "pageNextKey",
+                                            "value": "@if(greater(length(body('PARSE_Page_Result')), 0), concat(last(body('PARSE_Page_Result'))?['rootID'], '|', last(body('PARSE_Page_Result'))?['updatedAt']), '')"
+                                        },
+                                        "runAfter": {
+                                            "FOREACH_Page_Risk": [
+                                                "Succeeded",
+                                                "Failed"
+                                            ]
+                                        }
+                                    },
+                                    "INCREMENT_Pages_Read": {
+                                        "type": "IncrementVariable",
+                                        "inputs": {
+                                            "name": "pagesReadCount",
+                                            "value": 1
+                                        },
+                                        "runAfter": {
+                                            "SET_More_Pages": [
+                                                "Succeeded"
+                                            ],
+                                            "SET_Page_Next_Key": [
+                                                "Succeeded"
+                                            ]
+                                        }
+                                    }
+                                }
+                            },
+                            "COMPOSE_GetDocumentsMetadata_Response": {
+                                "type": "Compose",
+                                "inputs": {
+                                    "items": "@variables('riskItems')",
+                                    "watermarkTo": "@variables('watermarkToInternal')",
+                                    "pagesRead": "@variables('pagesReadCount')"
+                                },
+                                "runAfter": {
+                                    "UNTIL_All_Pages": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "Response_GetDocumentsMetadata": {
+                                "type": "Response",
+                                "inputs": {
+                                    "statusCode": 200,
+                                    "body": "@outputs('COMPOSE_GetDocumentsMetadata_Response')"
+                                },
+                                "runAfter": {
+                                    "COMPOSE_GetDocumentsMetadata_Response": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            },
+                            "Response_GetDocumentsMetadata_Error": {
+                                "type": "Response",
+                                "inputs": {
+                                    "statusCode": 500,
+                                    "body": {
+                                        "error": "GetDocumentsMetadata failed",
+                                        "workloadId": "@triggerBody()?['workloadId']"
+                                    }
+                                },
+                                "runAfter": {
+                                    "UNTIL_All_Pages": [
+                                        "Failed",
+                                        "TimedOut"
+                                    ]
+                                }
+                            }
+                        },
+                        "case": "GetDocumentsMetadata"
+                    }
+                },
+                "runAfter": {
+                    "IF_Assert_CorrelationId_Consistent": [
+                        "Succeeded"
+                    ]
+                }
+            }
+        },
+        "outputs": {}
+    },
+    "kind": "Stateful"
+}
