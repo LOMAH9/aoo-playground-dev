@@ -12,15 +12,15 @@
             "required": ["function", "configCode", "correlationId"],
             "properties": {
               "function":         { "type": "string", "enum": ["GetDocumentsMetadata", "DownloadDocumentToStaging", "UploadDocumentFromPath"] },
-              "configCode":       { "type": "string" },
+              "configCode":       { "type": "string", "description": "SourceConfigCode (source functions) or DestinationConfigCode (upload function). Used as app settings prefix." },
               "workloadId":     { "type": "string" },
               "externalId":           { "type": "string" },
               "documentId":       { "type": "string" },
               "revision":         { "type": "string" },
               "fileName":         { "type": "string" },
               "contentType":      { "type": "string" },
-              "stagingBlobPath":  { "type": "string" },
-              "targetFolderPath": { "type": "string" },
+              "stagingBlobPath":  { "type": "string", "description": "Required for UploadDocumentFromPath." },
+              "targetFolderPath": { "type": "string", "description": "Risk relative folder path for destination. Required for UploadDocumentFromPath." },
               "watermarkFrom":    { "type": "string" },
               "nextKey":          { "type": "string" },
               "correlationId":    { "type": "string" }
@@ -85,145 +85,28 @@
           "GetDocumentsMetadata": {
             "case": "GetDocumentsMetadata",
             "actions": {
-
-              "COMPOSE_Source_Container": {
-                "type": "Compose",
-                "inputs": "@if(empty(trim(coalesce(triggerBody()?['configCode'], '')), appsetting('source_container_name'), coalesce(appsetting(concat(triggerBody()?['configCode'], '::source_container_name')), appsetting('source_container_name')))",
-                "runAfter": {}
-              },
-              "COMPOSE_Source_Prefix": {
-                "type": "Compose",
-                "inputs": "@if(empty(trim(coalesce(triggerBody()?['configCode'], '')), appsetting('source_blob_prefix'), coalesce(appsetting(concat(triggerBody()?['configCode'], '::source_blob_prefix')), appsetting('source_blob_prefix')))",
-                "runAfter": {}
-              },
-
-              "BLOB_List_Blobs": {
-                "type": "ServiceProvider",
-                "runAfter": {
-                  "COMPOSE_Source_Container": ["Succeeded"],
-                  "COMPOSE_Source_Prefix":    ["Succeeded"]
-                },
-                "inputs": {
-                  "parameters": {
-                    "containerName": "@outputs('COMPOSE_Source_Container')",
-                    "prefix":        "@outputs('COMPOSE_Source_Prefix')"
-                  },
-                  "serviceProviderConfiguration": {
-                    "connectionName":    "azureBlob",
-                    "operationId":       "listBlobs",
-                    "serviceProviderId": "/serviceProviders/AzureBlob"
-                  }
-                }
-              },
-
-              "SELECT_Blob_Items": {
-                "type": "Select",
-                "runAfter": { "BLOB_List_Blobs": ["Succeeded"] },
-                "inputs": {
-                  "from": "@body('BLOB_List_Blobs')?['value']",
-                  "select": {
-                    "externalId":    "@item()?['name']",
-                    "umr":           null,
-                    "insuredName":   null,
-                    "inceptionDate": null,
-                    "status":        null,
-                    "updatedAt":     "@item()?['properties']?['lastModified']",
-                    "documents":     "@createArray(createObject('documentId', item()?['name'], 'parentDocumentId', null, 'revision', item()?['properties']?['etag'], 'fileName', last(split(item()?['name'], '/')), 'digest', item()?['properties']?['contentMD5'], 'contentType', item()?['properties']?['contentType'], 'sizeBytes', item()?['properties']?['contentLength']))"
-                  }
-                }
-              },
-
-              "COMPOSE_GetMetadata_Response": {
-                "type": "Compose",
-                "runAfter": { "SELECT_Blob_Items": ["Succeeded"] },
-                "inputs": {
-                  "items":       "@body('SELECT_Blob_Items')",
-                  "hasMore":     false,
-                  "nextKey":     "",
-                  "watermarkTo": "@utcNow()"
-                }
-              },
-
-              "Response_GetMetadata": {
+              "Response_GetMetadata_NotImplemented": {
                 "type": "Response",
-                "runAfter": { "COMPOSE_GetMetadata_Response": ["Succeeded"] },
-                "inputs": { "statusCode": 200, "body": "@outputs('COMPOSE_GetMetadata_Response')" }
+                "inputs": {
+                  "statusCode": 501,
+                  "body": { "error": "SharePoint GetDocumentsMetadata not yet implemented." }
+                },
+                "runAfter": {}
               }
-
             }
           },
 
           "DownloadDocumentToStaging": {
             "case": "DownloadDocumentToStaging",
             "actions": {
-
-              "COMPOSE_Source_Container_Dl": {
-                "type": "Compose",
-                "inputs": "@if(empty(trim(coalesce(triggerBody()?['configCode'], '')), appsetting('source_container_name'), coalesce(appsetting(concat(triggerBody()?['configCode'], '::source_container_name')), appsetting('source_container_name')))",
-                "runAfter": {}
-              },
-              "COMPOSE_Staging_Blob_Path": {
-                "type": "Compose",
-                "inputs": "@{concat('staging/', triggerBody()?['workloadId'], '/', triggerBody()?['externalId'], '/', triggerBody()?['documentId'], '-', triggerBody()?['revision'])}",
-                "runAfter": {}
-              },
-
-              "BLOB_Download_Source": {
-                "type": "ServiceProvider",
-                "runAfter": {
-                  "COMPOSE_Source_Container_Dl": ["Succeeded"],
-                  "COMPOSE_Staging_Blob_Path":   ["Succeeded"]
-                },
-                "inputs": {
-                  "parameters": {
-                    "containerName": "@outputs('COMPOSE_Source_Container_Dl')",
-                    "blobName":      "@triggerBody()?['documentId']"
-                  },
-                  "serviceProviderConfiguration": {
-                    "connectionName":    "azureBlob",
-                    "operationId":       "readBlob",
-                    "serviceProviderId": "/serviceProviders/AzureBlob"
-                  }
-                }
-              },
-
-              "BLOB_Upload_To_Staging": {
-                "type": "ServiceProvider",
-                "runAfter": { "BLOB_Download_Source": ["Succeeded"] },
-                "inputs": {
-                  "parameters": {
-                    "containerName": "@appsetting('blob_staging_container')",
-                    "blobName":      "@outputs('COMPOSE_Staging_Blob_Path')",
-                    "content":       "@body('BLOB_Download_Source')?['content']",
-                    "overwrite":     false,
-                    "metadata": {
-                      "partnerrevision":   "@triggerBody()?['revision']",
-                      "workloadcode":      "@triggerBody()?['workloadId']",
-                      "partnerexternalid": "@triggerBody()?['externalId']"
-                    }
-                  },
-                  "serviceProviderConfiguration": {
-                    "connectionName":    "azureBlob",
-                    "operationId":       "uploadBlob",
-                    "serviceProviderId": "/serviceProviders/AzureBlob"
-                  }
-                }
-              },
-
-              "Response_Download": {
+              "Response_Download_NotImplemented": {
                 "type": "Response",
-                "runAfter": { "BLOB_Upload_To_Staging": ["Succeeded"] },
                 "inputs": {
-                  "statusCode": 200,
-                  "body": {
-                    "stagingBlobPath": "@outputs('COMPOSE_Staging_Blob_Path')",
-                    "actualDigest":    "",
-                    "contentType":     "@triggerBody()?['contentType']",
-                    "sizeBytes":       "@body('BLOB_Download_Source')?['properties']?['contentLength']"
-                  }
-                }
+                  "statusCode": 501,
+                  "body": { "error": "SharePoint DownloadDocumentToStaging not yet implemented." }
+                },
+                "runAfter": {}
               }
-
             }
           },
 
@@ -231,23 +114,15 @@
             "case": "UploadDocumentFromPath",
             "actions": {
 
-              "COMPOSE_Dest_Container": {
+              "COMPOSE_Drive_Id": {
                 "type": "Compose",
-                "inputs": "@if(empty(trim(coalesce(triggerBody()?['configCode'], '')), appsetting('destination_container_name'), coalesce(appsetting(concat(triggerBody()?['configCode'], '::destination_container_name')), appsetting('destination_container_name')))",
-                "runAfter": {}
-              },
-              "COMPOSE_Dest_Blob_Path": {
-                "type": "Compose",
-                "inputs": "@{concat(triggerBody()?['targetFolderPath'], '/', triggerBody()?['fileName'])}",
+                "inputs": "@if(empty(trim(coalesce(triggerBody()?['configCode'], '')), appsetting('sharepoint_site_drive_id'), coalesce(appsetting(concat(triggerBody()?['configCode'], '::sharepoint_site_drive_id')), appsetting('sharepoint_site_drive_id')))",
                 "runAfter": {}
               },
 
-              "BLOB_Download_From_Staging_Upload": {
+              "BLOB_Download_From_Staging": {
                 "type": "ServiceProvider",
-                "runAfter": {
-                  "COMPOSE_Dest_Container": ["Succeeded"],
-                  "COMPOSE_Dest_Blob_Path":  ["Succeeded"]
-                },
+                "runAfter": { "COMPOSE_Drive_Id": ["Succeeded"] },
                 "inputs": {
                   "parameters": {
                     "containerName": "@appsetting('blob_staging_container')",
@@ -261,32 +136,55 @@
                 }
               },
 
-              "BLOB_Upload_To_Dest": {
-                "type": "ServiceProvider",
-                "runAfter": { "BLOB_Download_From_Staging_Upload": ["Succeeded"] },
+              "COMPOSE_SP_Upload_Uri": {
+                "type": "Compose",
+                "runAfter": { "BLOB_Download_From_Staging": ["Succeeded"] },
+                "inputs": "@{concat('https://graph.microsoft.com/v1.0/drives/', outputs('COMPOSE_Drive_Id'), '/root:/', triggerBody()?['targetFolderPath'], '/', triggerBody()?['fileName'], ':/content')}"
+              },
+
+              "HTTP_Upload_To_SharePoint": {
+                "type": "Http",
+                "runAfter": { "COMPOSE_SP_Upload_Uri": ["Succeeded"] },
                 "inputs": {
-                  "parameters": {
-                    "containerName": "@outputs('COMPOSE_Dest_Container')",
-                    "blobName":      "@outputs('COMPOSE_Dest_Blob_Path')",
-                    "content":       "@body('BLOB_Download_From_Staging_Upload')?['content']",
-                    "overwrite":     false
+                  "method":  "PUT",
+                  "uri":     "@outputs('COMPOSE_SP_Upload_Uri')",
+                  "headers": {
+                    "Content-Type": "@coalesce(triggerBody()?['contentType'], 'application/octet-stream')"
                   },
-                  "serviceProviderConfiguration": {
-                    "connectionName":    "azureBlob",
-                    "operationId":       "uploadBlob",
-                    "serviceProviderId": "/serviceProviders/AzureBlob"
-                  }
+                  "body": "@body('BLOB_Download_From_Staging')?['content']",
+                  "authentication": {
+                    "type":     "ManagedServiceIdentity",
+                    "audience": "https://graph.microsoft.com"
+                  },
+                  "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT15S", "maximumInterval": "PT2M" }
                 }
               },
 
               "Response_Upload": {
                 "type": "Response",
-                "runAfter": { "BLOB_Upload_To_Dest": ["Succeeded"] },
+                "runAfter": { "HTTP_Upload_To_SharePoint": ["Succeeded"] },
                 "inputs": {
                   "statusCode": 200,
                   "body": {
-                    "targetPath": "@{concat(outputs('COMPOSE_Dest_Container'), '/', outputs('COMPOSE_Dest_Blob_Path'))}",
-                    "targetETag": ""
+                    "targetPath": "@body('HTTP_Upload_To_SharePoint')?['webUrl']",
+                    "targetETag": "@body('HTTP_Upload_To_SharePoint')?['eTag']"
+                  }
+                }
+              },
+
+              "Response_Upload_Error": {
+                "type": "Response",
+                "runAfter": {
+                  "BLOB_Download_From_Staging": ["Failed"],
+                  "HTTP_Upload_To_SharePoint":  ["Failed", "TimedOut"]
+                },
+                "inputs": {
+                  "statusCode": 500,
+                  "body": {
+                    "error":        "UploadDocumentFromPath failed",
+                    "stagingPath":  "@triggerBody()?['stagingBlobPath']",
+                    "targetFolder": "@triggerBody()?['targetFolderPath']",
+                    "fileName":     "@triggerBody()?['fileName']"
                   }
                 }
               }
@@ -297,7 +195,7 @@
         },
         "default": {
           "actions": {
-            "Response_Unsupported": {
+            "Response_Unsupported_Function": {
               "type": "Response",
               "inputs": {
                 "statusCode": 400,
