@@ -1,7 +1,6 @@
-                                    "COMPOSE_Page_Request_Body": {
-                                        "type": "Compose",
-                                        "inputs": {
-                                            "statuses": "@split(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], 'Signed,Endorsement'), ',')",
-                                            "umrSearch": "@if(empty(coalesce(triggerBody()?['filters']?['umrSearch'], '')), json('null'), triggerBody()?['filters']?['umrSearch'])"
-                                        }
-                                    },
+
+// ── Whitespace (Partner API) ───────────────────────────────────────────────
+// whitespaceApiAudienceId and whitespaceApiApimSubscriptionKey are set via CD pipeline variable group:
+//   WHITESPACE_API_AUDIENCE_ID, WHITESPACE_API_APIM_SUBSCRIPTION_KEY
+param whitespaceApiBaseUri = ''  // TODO: APIM suffix/route for Whitespace API (e.g. 'whitespace/v1')
+
