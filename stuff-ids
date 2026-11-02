@@ -1,8 +1,7 @@
-                          "SET_Append_RiskDocument": {
-                            "type": "AppendToArrayVariable",
-                            "runAfter": { "SET_CurrentRiskHasDocs_True": ["Succeeded"] },
-                            "inputs": {
-                              "name":  "riskDocuments",
-                              "value": "@createObject('stagingBlobPath', variables('downloadActivityResult')?['stagingBlobPath'], 'digest', items('FOREACH_Document')?['digest'], 'documentId', items('FOREACH_Document')?['documentId'], 'parentDocumentId', items('FOREACH_Document')?['parentDocumentId'], 'revision', items('FOREACH_Document')?['revision'], 'fileName', items('FOREACH_Document')?['fileName'], 'contentType', items('FOREACH_Document')?['contentType'])"
-                            }
-                          }
+                                    "COMPOSE_Page_Request_Body": {
+                                        "type": "Compose",
+                                        "inputs": {
+                                            "statuses": "@split(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], 'Signed,Endorsement'), ',')",
+                                            "umrSearch": "@if(empty(coalesce(triggerBody()?['filters']?['umrSearch'], '')), json('null'), triggerBody()?['filters']?['umrSearch'])"
+                                        }
+                                    },
