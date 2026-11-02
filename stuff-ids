@@ -1,70 +1,16 @@
-                                {
-                                    "equals": [
-                                        "@mod(div(int(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['DaysOfWeekMask'], 0)), int(createArray(64,1,2,4,8,16,32)[dayOfWeek(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')))])), 2)",
-                                        1
-                                    ]
-                                },
-                                {
-                                    "greaterOrEquals": [
-                                        "@formatDateTime(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')), 'HH:mm')",
-                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['WindowStartTime'], '00:00')"
-                                    ]
-                                },
-                                {
-                                    "or": [
-                                        {
-                                            "equals": [
-                                                "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['WindowEndTime'], '')",
-                                                ""
-                                            ]
-                                        },
-                                        {
-                                            "lessOrEquals": [
-                                                "@formatDateTime(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')), 'HH:mm')",
-                                                "@body('FILTER_Schedules_For_Current_Workload')?[0]?['WindowEndTime']"
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "or": [
-                                        {
-                                            "and": [
                                                 {
-                                                    "greater": [
-                                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0)",
-                                                        0
-                                                    ]
-                                                },
-                                                {
-                                                    "greaterOrEquals": [
-                                                        "@variables('nowUtc')",
-                                                        "@addMinutes(coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], items('FOREACH_Workload')?['InitialWatermarkUtc']), int(mul(float(string(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0))), 60)))"
-                                                    ]
-                                                },
-                                                {
-                                                    "lessOrEquals": [
-                                                        "@variables('nowUtc')",
-                                                        "@addMinutes(coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], items('FOREACH_Workload')?['InitialWatermarkUtc']), add(int(mul(float(string(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0))), 60)), 30))"
+                                                    "or": [
+                                                        {
+                                                            "equals": [
+                                                                "@coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], '')",
+                                                                ""
+                                                            ]
+                                                        },
+                                                        {
+                                                            "lessOrEquals": [
+                                                                "@variables('nowUtc')",
+                                                                "@addMinutes(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], add(int(mul(float(string(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0))), 60)), 30))"
+                                                            ]
+                                                        }
                                                     ]
                                                 }
-                                            ]
-                                        },
-                                        {
-                                            "and": [
-                                                {
-                                                    "lessOrEquals": [
-                                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0)",
-                                                        0
-                                                    ]
-                                                },
-                                                {
-                                                    "contains": [
-                                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['SpecificTimesCsv'], '')",
-                                                        "@formatDateTime(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')), 'HH:mm')"
-                                                    ]
-                                                }
-                                            ]
-                                        }
-                                    ]
-                                }
