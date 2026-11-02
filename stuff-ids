@@ -1,6 +1,34 @@
 
-// ── Whitespace (Partner API) ───────────────────────────────────────────────
-// whitespaceApiAudienceId and whitespaceApiApimSubscriptionKey are set via CD pipeline variable group:
-//   WHITESPACE_API_AUDIENCE_ID, WHITESPACE_API_APIM_SUBSCRIPTION_KEY
-param whitespaceApiBaseUri = ''  // TODO: APIM suffix/route for Whitespace API (e.g. 'whitespace/v1')
+// ── Whitespace (Partner API) ───────────────────────────────────────────────────
+// whitespace_api_apim_subscription_key is @secure() — supply via CD pipeline variable group,
+// not in a parameter file. whitespaceApiBaseUri and whitespaceApiAudienceId are non-secret.
+param whitespaceApiBaseUri string = ''
+param whitespaceApiAudienceId string = ''
+@secure()
+param whitespaceApiApimSubscriptionKey string = ''
 
+
+
+    whitespaceApiBaseUri:             whitespaceApiBaseUri
+    whitespaceApiAudienceId:          whitespaceApiAudienceId
+    whitespaceApiApimSubscriptionKey: whitespaceApiApimSubscriptionKey
+    // logicAppSubnetId: logicAppSubnetId  // [VNet]
+    // storageSubnetId:  storageSubnetId   // [VNet]
+
+
+
+
+-------------------------------
+
+param whitespaceApiBaseUri string = ''
+param whitespaceApiAudienceId string = ''
+@secure()
+param whitespaceApiApimSubscriptionKey string = ''
+
+
+
+
+        // ── Whitespace (Partner API) ───────────────────────────────────────────
+        { name: 'whitespace_api_base_uri',              value: whitespaceApiBaseUri }
+        { name: 'whitespace_api_audience_id',           value: whitespaceApiAudienceId }
+        { name: 'whitespace_api_apim_subscription_key', value: whitespaceApiApimSubscriptionKey }
