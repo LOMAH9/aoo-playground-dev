@@ -1,419 +1,415 @@
 {
-    "definition":  {
-                       "$schema":  "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-                       "contentVersion":  "1.0.0.0",
-                       "triggers":  {
-                                        "Recurrence":  {
-                                                           "type":  "Recurrence",
-                                                           "recurrence":  {
-                                                                              "frequency":  "Minute",
-                                                                              "interval":  5
-                                                                          }
-                                                       }
-                                    },
-                       "actions":  {
-                                       "INIT_Variables":  {
-                                                              "type":  "InitializeVariable",
-                                                              "inputs":  {
-                                                                             "variables":  [
-                                                                                               {
-                                                                                                   "name":  "nowUtc",
-                                                                                                   "type":  "string",
-                                                                                                   "value":  "@utcNow()"
-                                                                                               }
-                                                                                           ]
-                                                                         },
-                                                              "runAfter":  {
-
-                                                                           }
-                                                          },
-                                       "TABLES_Get_Bank_Holidays_Today":  {
-                                                                              "type":  "ServiceProvider",
-                                                                              "inputs":  {
-                                                                                             "serviceProviderConfiguration":  {
-                                                                                                                                  "connectionName":  "azureTables",
-                                                                                                                                  "operationId":  "queryEntities",
-                                                                                                                                  "serviceProviderId":  "/serviceProviders/azureTables"
-                                                                                                                              },
-                                                                                             "parameters":  {
-                                                                                                                "tableName":  "DtsNonWorkingDays",
-                                                                                                                "filterQuery":  "@{concat(\u0027PartitionKey eq \u0027\u0027england-and-wales\u0027\u0027 and RowKey eq \u0027\u0027\u0027, formatDateTime(variables(\u0027nowUtc\u0027), \u0027yyyy-MM-dd\u0027), \u0027\u0027\u0027\u0027)}"
-                                                                                                            }
-                                                                                         },
-                                                                              "runAfter":  {
-                                                                                               "INIT_Variables":  [
-                                                                                                                      "Succeeded"
-                                                                                                                  ]
-                                                                                           }
-                                                                          },
-                                       "COMPOSE_Is_Bank_Holiday":  {
-                                                                       "type":  "Compose",
-                                                                       "inputs":  "@greater(length(body(\u0027TABLES_Get_Bank_Holidays_Today\u0027)?[\u0027entities\u0027]), 0)",
-                                                                       "runAfter":  {
-                                                                                        "TABLES_Get_Bank_Holidays_Today":  [
-                                                                                                                               "Succeeded"
-                                                                                                                           ]
-                                                                                    }
-                                                                   },
-                                       "TABLES_Get_Enabled_Partners":  {
-                                                                           "type":  "ServiceProvider",
-                                                                           "inputs":  {
-                                                                                          "serviceProviderConfiguration":  {
-                                                                                                                               "connectionName":  "azureTables",
-                                                                                                                               "operationId":  "queryEntities",
-                                                                                                                               "serviceProviderId":  "/serviceProviders/azureTables"
-                                                                                                                           },
-                                                                                          "parameters":  {
-                                                                                                             "tableName":  "DtsPartners",
-                                                                                                             "filterQuery":  "@{concat(\u0027IsEnabled eq true and ValidFromUtc le \u0027\u0027\u0027, variables(\u0027nowUtc\u0027), \u0027\u0027\u0027 and ValidToUtc ge \u0027\u0027\u0027, variables(\u0027nowUtc\u0027), \u0027\u0027\u0027\u0027)}"
-                                                                                                         }
-                                                                                      },
-                                                                           "runAfter":  {
-                                                                                            "COMPOSE_Is_Bank_Holiday":  [
-                                                                                                                            "Succeeded"
-                                                                                                                        ]
-                                                                                        }
-                                                                       },
-                                       "SELECT_Active_Partner_Codes":  {
-                                                                           "type":  "Select",
-                                                                           "inputs":  {
-                                                                                          "from":  "@body(\u0027TABLES_Get_Enabled_Partners\u0027)?[\u0027entities\u0027]",
-                                                                                          "select":  "@item()?[\u0027PartitionKey\u0027]"
-                                                                                      },
-                                                                           "runAfter":  {
-                                                                                            "TABLES_Get_Enabled_Partners":  [
-                                                                                                                                "Succeeded"
-                                                                                                                            ]
-                                                                                        }
-                                                                       },
-                                       "COMPOSE_Active_Partner_Filter":  {
-                                                                             "type":  "Compose",
-                                                                             "inputs":  "@{if(equals(length(body(\u0027SELECT_Active_Partner_Codes\u0027)), 0), \u0027IsEnabled eq true and IsPaused eq false and PartnerId eq \u0027\u0027__NONE__\u0027\u0027\u0027, concat(\u0027IsEnabled eq true and IsPaused eq false and (PartnerId eq \u0027\u0027\u0027, join(body(\u0027SELECT_Active_Partner_Codes\u0027), \u0027\u0027\u0027 or PartnerId eq \u0027\u0027\u0027), \u0027\u0027\u0027)\u0027)))}",
-                                                                             "runAfter":  {
-                                                                                              "SELECT_Active_Partner_Codes":  [
-                                                                                                                                  "Succeeded"
-                                                                                                                              ]
-                                                                                          }
-                                                                         },
-                                       "TABLES_Get_Active_Workloads":  {
-                                                                           "type":  "ServiceProvider",
-                                                                           "inputs":  {
-                                                                                          "serviceProviderConfiguration":  {
-                                                                                                                               "connectionName":  "azureTables",
-                                                                                                                               "operationId":  "queryEntities",
-                                                                                                                               "serviceProviderId":  "/serviceProviders/azureTables"
-                                                                                                                           },
-                                                                                          "parameters":  {
-                                                                                                             "tableName":  "DtsWorkloads",
-                                                                                                             "filterQuery":  "@outputs(\u0027COMPOSE_Active_Partner_Filter\u0027)"
-                                                                                                         }
-                                                                                      },
-                                                                           "runAfter":  {
-                                                                                            "COMPOSE_Active_Partner_Filter":  [
-                                                                                                                                  "Succeeded"
-                                                                                                                              ]
-                                                                                        }
-                                                                       },
-                                       "SELECT_Active_Workload_Codes":  {
-                                                                            "type":  "Select",
-                                                                            "inputs":  {
-                                                                                           "from":  "@body(\u0027TABLES_Get_Active_Workloads\u0027)?[\u0027entities\u0027]",
-                                                                                           "select":  "@item()?[\u0027PartitionKey\u0027]"
-                                                                                       },
-                                                                            "runAfter":  {
-                                                                                             "TABLES_Get_Active_Workloads":  [
-                                                                                                                                 "Succeeded"
-                                                                                                                             ]
-                                                                                         }
-                                                                        },
-                                       "COMPOSE_Runtime_States_Query_Filter":  {
-                                                                                   "type":  "Compose",
-                                                                                   "inputs":  "@{if(equals(length(body(\u0027SELECT_Active_Workload_Codes\u0027)), 0), \u0027PartitionKey eq \u0027\u0027__NONE__\u0027\u0027\u0027, concat(\u0027(PartitionKey eq \u0027\u0027\u0027, join(body(\u0027SELECT_Active_Workload_Codes\u0027), \u0027\u0027\u0027 or PartitionKey eq \u0027\u0027\u0027), \u0027\u0027\u0027)\u0027))}",
-                                                                                   "runAfter":  {
-                                                                                                    "SELECT_Active_Workload_Codes":  [
-                                                                                                                                         "Succeeded"
-                                                                                                                                     ]
-                                                                                                }
-                                                                               },
-                                       "COMPOSE_Schedules_Query_Filter":  {
-                                                                              "type":  "Compose",
-                                                                              "inputs":  "@{if(equals(length(body(\u0027SELECT_Active_Workload_Codes\u0027)), 0), \u0027PartitionKey eq \u0027\u0027__NONE__\u0027\u0027 and IsEnabled eq true\u0027, concat(\u0027(PartitionKey eq \u0027\u0027\u0027, join(body(\u0027SELECT_Active_Workload_Codes\u0027), \u0027\u0027\u0027 or PartitionKey eq \u0027\u0027\u0027), \u0027\u0027\u0027) and IsEnabled eq true and EffectiveFromUtc le \u0027\u0027\u0027, variables(\u0027nowUtc\u0027), \u0027\u0027\u0027 and EffectiveToUtc ge \u0027\u0027\u0027, variables(\u0027nowUtc\u0027), \u0027\u0027\u0027 and WindowStartTime le \u0027\u0027\u0027, formatDateTime(variables(\u0027nowUtc\u0027), \u0027HH:mm\u0027), \u0027\u0027\u0027 and WindowEndTime ge \u0027\u0027\u0027, formatDateTime(variables(\u0027nowUtc\u0027), \u0027HH:mm\u0027), \u0027\u0027\u0027\u0027))}",
-                                                                              "runAfter":  {
-                                                                                               "SELECT_Active_Workload_Codes":  [
-                                                                                                                                    "Succeeded"
-                                                                                                                                ]
-                                                                                           }
-                                                                          },
-                                       "TABLES_Get_Runtime_States_For_Active_Workloads":  {
-                                                                                              "type":  "ServiceProvider",
-                                                                                              "inputs":  {
-                                                                                                             "serviceProviderConfiguration":  {
-                                                                                                                                                  "connectionName":  "azureTables",
-                                                                                                                                                  "operationId":  "queryEntities",
-                                                                                                                                                  "serviceProviderId":  "/serviceProviders/azureTables"
-                                                                                                                                              },
-                                                                                                             "parameters":  {
-                                                                                                                                "tableName":  "DtsWorkloadRuntimeState",
-                                                                                                                                "filterQuery":  "@outputs(\u0027COMPOSE_Runtime_States_Query_Filter\u0027)"
-                                                                                                                            }
-                                                                                                         },
-                                                                                              "runAfter":  {
-                                                                                                               "COMPOSE_Runtime_States_Query_Filter":  [
-                                                                                                                                                           "Succeeded"
-                                                                                                                                                       ]
-                                                                                                           }
-                                                                                          },
-                                       "TABLES_Get_Schedules_For_Active_Workloads":  {
-                                                                                         "type":  "ServiceProvider",
-                                                                                         "inputs":  {
-                                                                                                        "serviceProviderConfiguration":  {
-                                                                                                                                             "connectionName":  "azureTables",
-                                                                                                                                             "operationId":  "queryEntities",
-                                                                                                                                             "serviceProviderId":  "/serviceProviders/azureTables"
-                                                                                                                                         },
-                                                                                                        "parameters":  {
-                                                                                                                           "tableName":  "DtsWorkloadSchedules",
-                                                                                                                           "filterQuery":  "@outputs(\u0027COMPOSE_Schedules_Query_Filter\u0027)"
-                                                                                                                       }
-                                                                                                    },
-                                                                                         "runAfter":  {
-                                                                                                          "COMPOSE_Schedules_Query_Filter":  [
-                                                                                                                                                 "Succeeded"
-                                                                                                                                             ]
-                                                                                                      }
-                                                                                     },
-                                       "FOREACH_Workload":  {
-                                                                "type":  "Foreach",
-                                                                "foreach":  "@body(\u0027TABLES_Get_Active_Workloads\u0027)?[\u0027entities\u0027]",
-                                                                "actions":  {
-                                                                                "FILTER_RunTimeState_For_Current_Workload":  {
-                                                                                                                                 "type":  "Query",
-                                                                                                                                 "inputs":  {
-                                                                                                                                                "from":  "@body(\u0027TABLES_Get_Runtime_States_For_Active_Workloads\u0027)?[\u0027entities\u0027]",
-                                                                                                                                                "where":  "@equals(item()?[\u0027PartitionKey\u0027], items(\u0027FOREACH_Workload\u0027)?[\u0027PartitionKey\u0027])"
-                                                                                                                                            }
-                                                                                                                             },
-                                                                                "FILTER_Schedules_For_Current_Workload":  {
-                                                                                                                              "type":  "Query",
-                                                                                                                              "inputs":  {
-                                                                                                                                             "from":  "@body(\u0027TABLES_Get_Schedules_For_Active_Workloads\u0027)?[\u0027entities\u0027]",
-                                                                                                                                             "where":  "@equals(item()?[\u0027PartitionKey\u0027], items(\u0027FOREACH_Workload\u0027)?[\u0027PartitionKey\u0027])"
-                                                                                                                                         },
-                                                                                                                              "runAfter":  {
-                                                                                                                                               "FILTER_RunTimeState_For_Current_Workload":  [
-                                                                                                                                                                                                "Succeeded"
-                                                                                                                                                                                            ]
-                                                                                                                                           }
-                                                                                                                          },
-                                                                                "IF_Workload_Is_Due":  {
-                                                                                                           "type":  "If",
-                                                                                                           "expression":  {
-                                                                                                                              "and":  [
-                                                                                                                                          {
-                                                                                                                                              "greaterOrEquals":  [
-                                                                                                                                                                      "@length(body(\u0027FILTER_Schedules_For_Current_Workload\u0027))",
-                                                                                                                                                                      1
-                                                                                                                                                                  ]
-                                                                                                                                          },
-                                                                                                                                          {
-                                                                                                                                              "not":  {
-                                                                                                                                                          "equals":  [
-                                                                                                                                                                         "@coalesce(body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027LastStatus\u0027], \u0027\u0027)",
-                                                                                                                                                                         "Running"
-                                                                                                                                                                     ]
-                                                                                                                                                      }
-                                                                                                                                          },
-                                                                                                                                          {
-                                                                                                                                              "or":  [
-                                                                                                                                                         {
-                                                                                                                                                             "equals":  [
-                                                                                                                                                                            "@coalesce(items(\u0027FOREACH_Workload\u0027)?[\u0027RunOnBankHolidays\u0027], true)",
-                                                                                                                                                                            true
-                                                                                                                                                                        ]
-                                                                                                                                                         },
-                                                                                                                                                         {
-                                                                                                                                                             "equals":  [
-                                                                                                                                                                            "@outputs(\u0027COMPOSE_Is_Bank_Holiday\u0027)",
-                                                                                                                                                                            false
-                                                                                                                                                                        ]
-                                                                                                                                                         }
-                                                                                                                                                     ]
-                                                                                                                                          },
-                                                                                                                                          {
-                                                                                                                                              "equals":  [
-                                                                                                                                                             "@mod(div(int(coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027DaysOfWeekMask\u0027], 0)), int(createArray(64,1,2,4,8,16,32)[dayOfWeek(convertTimeZone(variables(\u0027nowUtc\u0027), \u0027UTC\u0027, coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027TimeZoneId\u0027], \u0027UTC\u0027)))])), 2)",
-                                                                                                                                                             1
-                                                                                                                                                         ]
-                                                                                                                                          },
-                                                                                                                                          {
-                                                                                                                                              "greaterOrEquals":  [
-                                                                                                                                                                      "@formatDateTime(convertTimeZone(variables(\u0027nowUtc\u0027), \u0027UTC\u0027, coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027TimeZoneId\u0027], \u0027UTC\u0027)), \u0027HH:mm\u0027)",
-                                                                                                                                                                      "@coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027WindowStartTime\u0027], \u002700:00\u0027)"
-                                                                                                                                                                  ]
-                                                                                                                                          },
-                                                                                                                                          {
-                                                                                                                                              "or":  [
-                                                                                                                                                         {
-                                                                                                                                                             "equals":  [
-                                                                                                                                                                            "@coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027WindowEndTime\u0027], \u0027\u0027)",
-                                                                                                                                                                            ""
-                                                                                                                                                                        ]
-                                                                                                                                                         },
-                                                                                                                                                         {
-                                                                                                                                                             "lessOrEquals":  [
-                                                                                                                                                                                  "@formatDateTime(convertTimeZone(variables(\u0027nowUtc\u0027), \u0027UTC\u0027, coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027TimeZoneId\u0027], \u0027UTC\u0027)), \u0027HH:mm\u0027)",
-                                                                                                                                                                                  "@body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027WindowEndTime\u0027]"
-                                                                                                                                                                              ]
-                                                                                                                                                         }
-                                                                                                                                                     ]
-                                                                                                                                          },
-                                                                                                                                          {
-                                                                                                                                              "or":  [
-                                                                                                                                                         {
-                                                                                                                                                             "and":  [
-                                                                                                                                                                         {
-                                                                                                                                                                             "greater":  [
-                                                                                                                                                                                             "@coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027IntervalHours\u0027], 0)",
-                                                                                                                                                                                             0
-                                                                                                                                                                                         ]
-                                                                                                                                                                         },
-                                                                                                                                                                         {
-                                                                                                                                                                             "greaterOrEquals":  [
-                                                                                                                                                                                                     "@variables(\u0027nowUtc\u0027)",
-                                                                                                                                                                                                     "@addHours(coalesce(body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027LastRunStartedUtc\u0027], items(\u0027FOREACH_Workload\u0027)?[\u0027InitialWatermarkUtc\u0027]), float(coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027IntervalHours\u0027], 0)))"
-                                                                                                                                                                                                 ]
-                                                                                                                                                                         },
-                                                                                                                                                                         {
-                                                                                                                                                                             "lessOrEquals":  [
-                                                                                                                                                                                                  "@variables(\u0027nowUtc\u0027)",
-                                                                                                                                                                                                  "@addMinutes(addHours(coalesce(body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027LastRunStartedUtc\u0027], items(\u0027FOREACH_Workload\u0027)?[\u0027InitialWatermarkUtc\u0027]), float(coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027IntervalHours\u0027], 0))), 30)"
-                                                                                                                                                                                              ]
-                                                                                                                                                                         }
-                                                                                                                                                                     ]
-                                                                                                                                                         },
-                                                                                                                                                         {
-                                                                                                                                                             "and":  [
-                                                                                                                                                                         {
-                                                                                                                                                                             "lessOrEquals":  [
-                                                                                                                                                                                                  "@coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027IntervalHours\u0027], 0)",
-                                                                                                                                                                                                  0
-                                                                                                                                                                                              ]
-                                                                                                                                                                         },
-                                                                                                                                                                         {
-                                                                                                                                                                             "contains":  [
-                                                                                                                                                                                              "@coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027SpecificTimesCsv\u0027], \u0027\u0027)",
-                                                                                                                                                                                              "@formatDateTime(convertTimeZone(variables(\u0027nowUtc\u0027), \u0027UTC\u0027, coalesce(body(\u0027FILTER_Schedules_For_Current_Workload\u0027)?[0]?[\u0027TimeZoneId\u0027], \u0027UTC\u0027)), \u0027HH:mm\u0027)"
-                                                                                                                                                                                          ]
-                                                                                                                                                                         }
-                                                                                                                                                                     ]
-                                                                                                                                                         }
-                                                                                                                                                     ]
-                                                                                                                                          }
-                                                                                                                                      ]
-                                                                                                                          },
-                                                                                                           "actions":  {
-                                                                                                                           "SCOPE_Try_Dispatch":  {
-                                                                                                                                                      "type":  "Scope",
-                                                                                                                                                      "actions":  {
-                                                                                                                                                                      "WORKFLOW_Call_Discovery_Orchestrator_For_Workload":  {
-                                                                                                                                                                                                                                "type":  "Workflow",
-                                                                                                                                                                                                                                "inputs":  {
-                                                                                                                                                                                                                                               "host":  {
-                                                                                                                                                                                                                                                            "workflow":  {
-                                                                                                                                                                                                                                                                             "id":  "wf-orchestrator-discovery"
-                                                                                                                                                                                                                                                                         }
-                                                                                                                                                                                                                                                        },
-                                                                                                                                                                                                                                               "method":  "POST",
-                                                                                                                                                                                                                                               "body":  {
-                                                                                                                                                                                                                                                            "workloadId":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027PartitionKey\u0027]",
-                                                                                                                                                                                                                                                            "partnerId":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027PartnerId\u0027]",
-                                                                                                                                                                                                                                                            "sourceType":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027SourceType\u0027]",
-                                                                                                                                                                                                                                                            "sourceConfigCode":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027SourceConfigCode\u0027]",
-                                                                                                                                                                                                                                                            "watermarkFromUtc":  "@addMinutes(coalesce(body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027CommittedWatermarkUtc\u0027], body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027InitialWatermarkUtc\u0027], items(\u0027FOREACH_Workload\u0027)?[\u0027InitialWatermarkUtc\u0027]), mul(-1, coalesce(int(items(\u0027FOREACH_Workload\u0027)?[\u0027OverlapWindowMinutes\u0027]), 30)))",
-                                                                                                                                                                                                                                                            "correlationId":  "@{concat(guid(), \u0027/\u0027, items(\u0027FOREACH_Workload\u0027)?[\u0027PartitionKey\u0027])}",
-                                                                                                                                                                                                                                                            "extDocumentTypesCsv":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027ExtDocumentTypesCsv\u0027]",
-                                                                                                                                                                                                                                                            "extDocStatusesCsv":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027ExtDocStatusesCsv\u0027]",
-                                                                                                                                                                                                                                                            "maxPagesPerRun":  "@coalesce(int(items(\u0027FOREACH_Workload\u0027)?[\u0027MaxPagesPerRun\u0027]), 50)",
-                                                                                                                                                                                                                                                            "overlapWindowMinutes":  "@coalesce(int(items(\u0027FOREACH_Workload\u0027)?[\u0027OverlapWindowMinutes\u0027]), 30)",
-                                                                                                                                                                                                                                                            "enableNotification":  "@coalesce(items(\u0027FOREACH_Workload\u0027)?[\u0027EnableNotification\u0027], false)",
-                                                                                                                                                                                                                                                            "notificationType":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027NotificationType\u0027]",
-                                                                                                                                                                                                                                                            "notifyOnErrorsOnly":  "@coalesce(items(\u0027FOREACH_Workload\u0027)?[\u0027NotifyOnErrorsOnly\u0027], true)",
-                                                                                                                                                                                                                                                            "notificationRecipient":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027NotificationRecipient\u0027]",
-                                                                                                                                                                                                                                                            "runtimeState":  {
-                                                                                                                                                                                                                                                                                 "lastStatus":  "@body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027LastStatus\u0027]",
-                                                                                                                                                                                                                                                                                 "lastRunStartedUtc":  "@body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027LastRunStartedUtc\u0027]",
-                                                                                                                                                                                                                                                                                 "committedWatermarkUtc":  "@body(\u0027FILTER_RunTimeState_For_Current_Workload\u0027)?[0]?[\u0027CommittedWatermarkUtc\u0027]",
-                                                                                                                                                                                                                                                                                 "initialWatermarkUtc":  "@items(\u0027FOREACH_Workload\u0027)?[\u0027InitialWatermarkUtc\u0027]"
-                                                                                                                                                                                                                                                                             },
-                                                                                                                                                                                                                                                            "dispatchedAtUtc":  "@utcNow()"
-                                                                                                                                                                                                                                                        }
-                                                                                                                                                                                                                                           }
-                                                                                                                                                                                                                            }
-                                                                                                                                                                  }
-                                                                                                                                                  },
-                                                                                                                           "SCOPE_Catch_Dispatch":  {
-                                                                                                                                                        "type":  "Scope",
-                                                                                                                                                        "actions":  {
-                                                                                                                                                                        "HTTP_Track_Dispatch_Failed_Event":  {
-                                                                                                                                                                                                                 "type":  "Http",
-                                                                                                                                                                                                                 "inputs":  {
-                                                                                                                                                                                                                                "uri":  "https://dc.services.visualstudio.com/v2/track",
-                                                                                                                                                                                                                                "method":  "POST",
-                                                                                                                                                                                                                                "body":  {
-                                                                                                                                                                                                                                             "name":  "Microsoft.ApplicationInsights.Event",
-                                                                                                                                                                                                                                             "time":  "@utcNow()",
-                                                                                                                                                                                                                                             "iKey":  "@appsetting(\u0027appinsights_instrumentation_key\u0027)",
-                                                                                                                                                                                                                                             "data":  {
-                                                                                                                                                                                                                                                          "baseType":  "EventData",
-                                                                                                                                                                                                                                                          "baseData":  {
-                                                                                                                                                                                                                                                                           "ver":  2,
-                                                                                                                                                                                                                                                                           "name":  "DTS_DiscoveryDispatchFailed",
-                                                                                                                                                                                                                                                                           "properties":  {
-                                                                                                                                                                                                                                                                                              "workloadId":  "@{items(\u0027FOREACH_Workload\u0027)?[\u0027PartitionKey\u0027]}",
-                                                                                                                                                                                                                                                                                              "correlationId":  "@{concat(items(\u0027FOREACH_Workload\u0027)?[\u0027PartitionKey\u0027], \u0027-dispatch-failed\u0027)}",
-                                                                                                                                                                                                                                                                                              "error":  "@{result(\u0027SCOPE_Try_Dispatch\u0027)?[0]?[\u0027error\u0027]?[\u0027message\u0027]}"
-                                                                                                                                                                                                                                                                                          }
-                                                                                                                                                                                                                                                                       }
-                                                                                                                                                                                                                                                      }
-                                                                                                                                                                                                                                         },
-                                                                                                                                                                                                                                "retryPolicy":  {
-                                                                                                                                                                                                                                                    "type":  "none"
-                                                                                                                                                                                                                                                }
-                                                                                                                                                                                                                            }
-                                                                                                                                                                                                             }
-                                                                                                                                                                    },
-                                                                                                                                                        "runAfter":  {
-                                                                                                                                                                         "SCOPE_Try_Dispatch":  [
-                                                                                                                                                                                                    "Failed",
-                                                                                                                                                                                                    "TimedOut",
-                                                                                                                                                                                                    "Skipped"
-                                                                                                                                                                                                ]
-                                                                                                                                                                     }
-                                                                                                                                                    }
-                                                                                                                       },
-                                                                                                           "else":  {
-                                                                                                                        "actions":  {
-
-                                                                                                                                    }
-                                                                                                                    },
-                                                                                                           "runAfter":  {
-                                                                                                                            "FILTER_Schedules_For_Current_Workload":  [
-                                                                                                                                                                          "Succeeded"
-                                                                                                                                                                      ]
-                                                                                                                        }
-                                                                                                       }
-                                                                            },
-                                                                "runAfter":  {
-                                                                                 "TABLES_Get_Runtime_States_For_Active_Workloads":  [
-                                                                                                                                        "Succeeded"
-                                                                                                                                    ],
-                                                                                 "TABLES_Get_Schedules_For_Active_Workloads":  [
-                                                                                                                                   "Succeeded"
-                                                                                                                               ]
-                                                                             },
-                                                                "operationOptions":  "Sequential"
-                                                            }
-                                   }
-                   },
-    "kind":  "Stateful"
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "Recurrence": {
+                "type": "Recurrence",
+                "recurrence": {
+                    "frequency": "Minute",
+                    "interval": 5
+                }
+            }
+        },
+        "actions": {
+            "INIT_Variables": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "nowUtc",
+                            "type": "string",
+                            "value": "@utcNow()"
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "TABLES_Get_Bank_Holidays_Today": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "serviceProviderConfiguration": {
+                        "connectionName": "azureTables",
+                        "operationId": "queryEntities",
+                        "serviceProviderId": "/serviceProviders/azureTables"
+                    },
+                    "parameters": {
+                        "tableName": "DtsNonWorkingDays",
+                        "filterQuery": "@{concat('PartitionKey eq ''england-and-wales'' and RowKey eq ''', formatDateTime(variables('nowUtc'), 'yyyy-MM-dd'), '''')}"
+                    }
+                },
+                "runAfter": {
+                    "INIT_Variables": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "COMPOSE_Is_Bank_Holiday": {
+                "type": "Compose",
+                "inputs": "@greater(length(body('TABLES_Get_Bank_Holidays_Today')?['entities']), 0)",
+                "runAfter": {
+                    "TABLES_Get_Bank_Holidays_Today": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "TABLES_Get_Enabled_Partners": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "serviceProviderConfiguration": {
+                        "connectionName": "azureTables",
+                        "operationId": "queryEntities",
+                        "serviceProviderId": "/serviceProviders/azureTables"
+                    },
+                    "parameters": {
+                        "tableName": "DtsPartners",
+                        "filterQuery": "@{concat('IsEnabled eq true and ValidFromUtc le ''', variables('nowUtc'), ''' and ValidToUtc ge ''', variables('nowUtc'), '''')}"
+                    }
+                },
+                "runAfter": {
+                    "COMPOSE_Is_Bank_Holiday": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "SELECT_Active_Partner_Codes": {
+                "type": "Select",
+                "inputs": {
+                    "from": "@body('TABLES_Get_Enabled_Partners')?['entities']",
+                    "select": "@item()?['PartitionKey']"
+                },
+                "runAfter": {
+                    "TABLES_Get_Enabled_Partners": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "COMPOSE_Active_Partner_Filter": {
+                "type": "Compose",
+                "inputs": "@{if(equals(length(body('SELECT_Active_Partner_Codes')), 0), 'IsEnabled eq true and IsPaused eq false and PartnerId eq ''__NONE__''', concat('IsEnabled eq true and IsPaused eq false and (PartnerId eq ''', join(body('SELECT_Active_Partner_Codes'), ''' or PartnerId eq '''), ''')')))}",
+                "runAfter": {
+                    "SELECT_Active_Partner_Codes": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "TABLES_Get_Active_Workloads": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "serviceProviderConfiguration": {
+                        "connectionName": "azureTables",
+                        "operationId": "queryEntities",
+                        "serviceProviderId": "/serviceProviders/azureTables"
+                    },
+                    "parameters": {
+                        "tableName": "DtsWorkloads",
+                        "filterQuery": "@outputs('COMPOSE_Active_Partner_Filter')"
+                    }
+                },
+                "runAfter": {
+                    "COMPOSE_Active_Partner_Filter": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "SELECT_Active_Workload_Codes": {
+                "type": "Select",
+                "inputs": {
+                    "from": "@body('TABLES_Get_Active_Workloads')?['entities']",
+                    "select": "@item()?['PartitionKey']"
+                },
+                "runAfter": {
+                    "TABLES_Get_Active_Workloads": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "COMPOSE_Runtime_States_Query_Filter": {
+                "type": "Compose",
+                "inputs": "@{if(equals(length(body('SELECT_Active_Workload_Codes')), 0), 'PartitionKey eq ''__NONE__''', concat('(PartitionKey eq ''', join(body('SELECT_Active_Workload_Codes'), ''' or PartitionKey eq '''), ''')'))}" ,
+                "runAfter": {
+                    "SELECT_Active_Workload_Codes": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "COMPOSE_Schedules_Query_Filter": {
+                "type": "Compose",
+                "inputs": "@{if(equals(length(body('SELECT_Active_Workload_Codes')), 0), 'PartitionKey eq ''__NONE__'' and IsEnabled eq true', concat('(PartitionKey eq ''', join(body('SELECT_Active_Workload_Codes'), ''' or PartitionKey eq '''), ''') and IsEnabled eq true and EffectiveFromUtc le ''', variables('nowUtc'), ''' and EffectiveToUtc ge ''', variables('nowUtc'), ''' and WindowStartTime le ''', formatDateTime(variables('nowUtc'), 'HH:mm'), ''' and WindowEndTime ge ''', formatDateTime(variables('nowUtc'), 'HH:mm'), ''''))}",
+                "runAfter": {
+                    "SELECT_Active_Workload_Codes": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "TABLES_Get_Runtime_States_For_Active_Workloads": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "serviceProviderConfiguration": {
+                        "connectionName": "azureTables",
+                        "operationId": "queryEntities",
+                        "serviceProviderId": "/serviceProviders/azureTables"
+                    },
+                    "parameters": {
+                        "tableName": "DtsWorkloadRuntimeState",
+                        "filterQuery": "@outputs('COMPOSE_Runtime_States_Query_Filter')"
+                    }
+                },
+                "runAfter": {
+                    "COMPOSE_Runtime_States_Query_Filter": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "TABLES_Get_Schedules_For_Active_Workloads": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "serviceProviderConfiguration": {
+                        "connectionName": "azureTables",
+                        "operationId": "queryEntities",
+                        "serviceProviderId": "/serviceProviders/azureTables"
+                    },
+                    "parameters": {
+                        "tableName": "DtsWorkloadSchedules",
+                        "filterQuery": "@outputs('COMPOSE_Schedules_Query_Filter')"
+                    }
+                },
+                "runAfter": {
+                    "COMPOSE_Schedules_Query_Filter": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "FOREACH_Workload": {
+                "type": "Foreach",
+                "foreach": "@body('TABLES_Get_Active_Workloads')?['entities']",
+                "actions": {
+                    "FILTER_RunTimeState_For_Current_Workload": {
+                        "type": "Query",
+                        "inputs": {
+                            "from": "@body('TABLES_Get_Runtime_States_For_Active_Workloads')?['entities']",
+                            "where": "@equals(item()?['PartitionKey'], items('FOREACH_Workload')?['PartitionKey'])"
+                        }
+                    },
+                    "FILTER_Schedules_For_Current_Workload": {
+                        "type": "Query",
+                        "inputs": {
+                            "from": "@body('TABLES_Get_Schedules_For_Active_Workloads')?['entities']",
+                            "where": "@equals(item()?['PartitionKey'], items('FOREACH_Workload')?['PartitionKey'])"
+                        },
+                        "runAfter": {
+                            "FILTER_RunTimeState_For_Current_Workload": [
+                                "Succeeded"
+                            ]
+                        }
+                    },
+                    "IF_Workload_Is_Due": {
+                        "type": "If",
+                        "expression": {
+                            "and": [
+                                {
+                                    "greaterOrEquals": [
+                                        "@length(body('FILTER_Schedules_For_Current_Workload'))",
+                                        1
+                                    ]
+                                },
+                                {
+                                    "not": {
+                                        "equals": [
+                                            "@coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastStatus'], '')",
+                                            "Running"
+                                        ]
+                                    }
+                                },
+                                {
+                                    "or": [
+                                        {
+                                            "equals": [
+                                                "@coalesce(items('FOREACH_Workload')?['RunOnBankHolidays'], true)",
+                                                true
+                                            ]
+                                        },
+                                        {
+                                            "equals": [
+                                                "@outputs('COMPOSE_Is_Bank_Holiday')",
+                                                false
+                                            ]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "equals": [
+                                        "@mod(div(int(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['DaysOfWeekMask'], 0)), int(createArray(64,1,2,4,8,16,32)[dayOfWeek(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')))])), 2)",
+                                        1
+                                    ]
+                                },
+                                {
+                                    "greaterOrEquals": [
+                                        "@formatDateTime(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')), 'HH:mm')",
+                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['WindowStartTime'], '00:00')"
+                                    ]
+                                },
+                                {
+                                    "or": [
+                                        {
+                                            "equals": [
+                                                "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['WindowEndTime'], '')",
+                                                ""
+                                            ]
+                                        },
+                                        {
+                                            "lessOrEquals": [
+                                                "@formatDateTime(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')), 'HH:mm')",
+                                                "@body('FILTER_Schedules_For_Current_Workload')?[0]?['WindowEndTime']"
+                                            ]
+                                        }
+                                    ]
+                                },
+                                {
+                                    "or": [
+                                        {
+                                            "and": [
+                                                {
+                                                    "greater": [
+                                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0)",
+                                                        0
+                                                    ]
+                                                },
+                                                {
+                                                    "greaterOrEquals": [
+                                                        "@variables('nowUtc')",
+                                                        "@addHours(coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], items('FOREACH_Workload')?['InitialWatermarkUtc']), float(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0)))"
+                                                    ]
+                                                },
+                                                {
+                                                    "lessOrEquals": [
+                                                        "@variables('nowUtc')",
+                                                        "@addMinutes(addHours(coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], items('FOREACH_Workload')?['InitialWatermarkUtc']), float(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0))), 30)"
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        {
+                                            "and": [
+                                                {
+                                                    "lessOrEquals": [
+                                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0)",
+                                                        0
+                                                    ]
+                                                },
+                                                {
+                                                    "contains": [
+                                                        "@coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['SpecificTimesCsv'], '')",
+                                                        "@formatDateTime(convertTimeZone(variables('nowUtc'), 'UTC', coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['TimeZoneId'], 'UTC')), 'HH:mm')"
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        "actions": {
+                            "SCOPE_Try_Dispatch": {
+                                "type": "Scope",
+                                "actions": {
+                                    "WORKFLOW_Call_Discovery_Orchestrator_For_Workload": {
+                                        "type": "Workflow",
+                                        "inputs": {
+                                            "host": {
+                                                "workflow": {
+                                                    "id": "wf-orchestrator-discovery"
+                                                }
+                                            },
+                                            "method": "POST",
+                                            "body": {
+                                                "workloadId": "@items('FOREACH_Workload')?['PartitionKey']",
+                                                "partnerId": "@items('FOREACH_Workload')?['PartnerId']",
+                                                "sourceType": "@items('FOREACH_Workload')?['SourceType']",
+                                                "sourceConfigCode": "@items('FOREACH_Workload')?['SourceConfigCode']",
+                                                "watermarkFromUtc": "@addMinutes(coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['CommittedWatermarkUtc'], body('FILTER_RunTimeState_For_Current_Workload')?[0]?['InitialWatermarkUtc'], items('FOREACH_Workload')?['InitialWatermarkUtc']), mul(-1, coalesce(int(items('FOREACH_Workload')?['OverlapWindowMinutes']), 30)))",
+                                                "correlationId": "@{concat(guid(), '/', items('FOREACH_Workload')?['PartitionKey'])}",
+                                                "extDocumentTypesCsv": "@items('FOREACH_Workload')?['ExtDocumentTypesCsv']",
+                                                "extDocStatusesCsv": "@items('FOREACH_Workload')?['ExtDocStatusesCsv']",
+                                                "maxPagesPerRun": "@coalesce(int(items('FOREACH_Workload')?['MaxPagesPerRun']), 50)",
+                                                "overlapWindowMinutes": "@coalesce(int(items('FOREACH_Workload')?['OverlapWindowMinutes']), 30)",
+                                                "enableNotification": "@coalesce(items('FOREACH_Workload')?['EnableNotification'], false)",
+                                                "notificationType": "@items('FOREACH_Workload')?['NotificationType']",
+                                                "notifyOnErrorsOnly": "@coalesce(items('FOREACH_Workload')?['NotifyOnErrorsOnly'], true)",
+                                                "notificationRecipient": "@items('FOREACH_Workload')?['NotificationRecipient']",
+                                                "runtimeState": {
+                                                    "lastStatus": "@body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastStatus']",
+                                                    "lastRunStartedUtc": "@body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc']",
+                                                    "committedWatermarkUtc": "@body('FILTER_RunTimeState_For_Current_Workload')?[0]?['CommittedWatermarkUtc']",
+                                                    "initialWatermarkUtc": "@items('FOREACH_Workload')?['InitialWatermarkUtc']"
+                                                },
+                                                "dispatchedAtUtc": "@utcNow()"
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "SCOPE_Catch_Dispatch": {
+                                "type": "Scope",
+                                "actions": {
+                                    "HTTP_Track_Dispatch_Failed_Event": {
+                                        "type": "Http",
+                                        "inputs": {
+                                            "uri": "https://dc.services.visualstudio.com/v2/track",
+                                            "method": "POST",
+                                            "body": {
+                                                "name": "Microsoft.ApplicationInsights.Event",
+                                                "time": "@utcNow()",
+                                                "iKey": "@appsetting('appinsights_instrumentation_key')",
+                                                "data": {
+                                                    "baseType": "EventData",
+                                                    "baseData": {
+                                                        "ver": 2,
+                                                        "name": "DTS_DiscoveryDispatchFailed",
+                                                        "properties": {
+                                                            "workloadId": "@{items('FOREACH_Workload')?['PartitionKey']}",
+                                                            "correlationId": "@{concat(items('FOREACH_Workload')?['PartitionKey'], '-dispatch-failed')}",
+                                                            "error": "@{result('SCOPE_Try_Dispatch')?[0]?['error']?['message']}"
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "retryPolicy": {
+                                                "type": "none"
+                                            }
+                                        }
+                                    }
+                                },
+                                "runAfter": {
+                                    "SCOPE_Try_Dispatch": [
+                                        "Failed",
+                                        "TimedOut",
+                                        "Skipped"
+                                    ]
+                                }
+                            }
+                        },
+                        "else": {
+                            "actions": {}
+                        },
+                        "runAfter": {
+                            "FILTER_Schedules_For_Current_Workload": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "runAfter": {
+                    "TABLES_Get_Runtime_States_For_Active_Workloads": [
+                        "Succeeded"
+                    ],
+                    "TABLES_Get_Schedules_For_Active_Workloads": [
+                        "Succeeded"
+                    ]
+                },
+                "operationOptions": "Sequential"
+            }
+        }
+    },
+    "kind": "Stateful"
 }
