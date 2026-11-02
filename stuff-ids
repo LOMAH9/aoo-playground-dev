@@ -1,34 +1,25 @@
-
-// ── Whitespace (Partner API) ───────────────────────────────────────────────────
-// whitespace_api_apim_subscription_key is @secure() — supply via CD pipeline variable group,
-// not in a parameter file. whitespaceApiBaseUri and whitespaceApiAudienceId are non-secret.
-param whitespaceApiBaseUri string = ''
-param whitespaceApiAudienceId string = ''
-@secure()
-param whitespaceApiApimSubscriptionKey string = ''
-
-
-
-    whitespaceApiBaseUri:             whitespaceApiBaseUri
-    whitespaceApiAudienceId:          whitespaceApiAudienceId
-    whitespaceApiApimSubscriptionKey: whitespaceApiApimSubscriptionKey
-    // logicAppSubnetId: logicAppSubnetId  // [VNet]
-    // storageSubnetId:  storageSubnetId   // [VNet]
-
-
-
-
--------------------------------
-
-param whitespaceApiBaseUri string = ''
-param whitespaceApiAudienceId string = ''
-@secure()
-param whitespaceApiApimSubscriptionKey string = ''
-
-
-
-
-        // ── Whitespace (Partner API) ───────────────────────────────────────────
-        { name: 'whitespace_api_base_uri',              value: whitespaceApiBaseUri }
-        { name: 'whitespace_api_audience_id',           value: whitespaceApiAudienceId }
-        { name: 'whitespace_api_apim_subscription_key', value: whitespaceApiApimSubscriptionKey }
+                        {
+                            "name": "apiBaseUrl",
+                            "type": "string",
+                            "value": "@{concat(if(empty(coalesce(triggerBody()?['sourceConfigCode'], '')), appsetting('apim_base_url'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::apim_base_url')), appsetting('apim_base_url'))), '/', if(empty(coalesce(triggerBody()?['sourceConfigCode'], '')), appsetting('whitespace_api_base_uri'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_base_uri')), appsetting('whitespace_api_base_uri'))))}"
+                        },
+                        {
+                            "name": "apimSubKey",
+                            "type": "string",
+                            "value": "@{if(empty(coalesce(triggerBody()?['sourceConfigCode'], '')), appsetting('whitespace_api_apim_subscription_key'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_apim_subscription_key')), appsetting('whitespace_api_apim_subscription_key')))}"
+                        },
+                        {
+                            "name": "correlationIdHeader",
+                            "type": "string",
+                            "value": "@{appsetting('correlation_id_header')}"
+                        },
+                        {
+                            "name": "correlationId",
+                            "type": "string",
+                            "value": "@{coalesce(triggerOutputs()?['headers']?[appsetting('correlation_id_header')], triggerBody()?['correlationId'], '')}"
+                        },
+                        {
+                            "name": "whitespaceAudienceId",
+                            "type": "string",
+                            "value": "@{if(empty(coalesce(triggerBody()?['sourceConfigCode'], '')), appsetting('whitespace_api_audience_id'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_audience_id')), appsetting('whitespace_api_audience_id')))}"
+                        },
