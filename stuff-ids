@@ -1,16 +1,1067 @@
-                                                {
-                                                    "or": [
-                                                        {
-                                                            "equals": [
-                                                                "@coalesce(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], '')",
-                                                                ""
-                                                            ]
-                                                        },
-                                                        {
-                                                            "lessOrEquals": [
-                                                                "@variables('nowUtc')",
-                                                                "@addMinutes(body('FILTER_RunTimeState_For_Current_Workload')?[0]?['LastRunStartedUtc'], add(int(mul(float(string(coalesce(body('FILTER_Schedules_For_Current_Workload')?[0]?['IntervalHours'], 0))), 60)), 30))"
-                                                            ]
-                                                        }
-                                                    ]
-                                                }
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "HTTP_Trigger": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "required": ["workloadId", "partnerId", "sourceType", "sourceConfigCode", "watermarkFromUtc", "correlationId"],
+            "properties": {
+              "workloadId":          { "type": "string" },
+              "partnerId":           { "type": "string" },
+              "sourceType":        { "type": "string" },
+              "sourceConfigCode":      { "type": "string" },
+              "extDocumentTypesCsv":   { "type": "string" },
+              "extDocStatusesCsv":     { "type": "string" },
+              "umrSearch":             { "type": "string" },
+              "maxPagesPerRun":        { "type": "integer" },
+              "overlapWindowMinutes":  { "type": "integer" },
+              "enableNotification":     { "type": "boolean" },
+              "notificationType":      { "type": "string" },
+              "notifyOnErrorsOnly":    { "type": "boolean" },
+              "notificationRecipient": { "type": "string" },
+              "watermarkFromUtc":      { "type": "string", "format": "date-time" },
+              "runtimeState":          { "type": "object" },
+              "correlationId":           { "type": "string" },
+              "dispatchedAtUtc":         { "type": "string", "format": "date-time" },
+              "requiresImmutableRecord": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+
+      "INIT_Variables": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            { "name": "runId",                   "type": "string",  "value": "@guid()" },
+            { "name": "currentRiskHasDocs",      "type": "boolean", "value": false },
+            { "name": "riskDocuments",           "type": "array",   "value": [] },
+            { "name": "watermarkToUtc",          "type": "string",  "value": "" },
+            { "name": "activityGetDocsResult",   "type": "object",  "value": {} },
+            { "name": "downloadActivityResult",  "type": "object",  "value": {} },
+            { "name": "bundleDownloadResults",   "type": "array",   "value": [] }
+          ]
+        },
+        "runAfter": {}
+      },
+
+      "SCOPE_Open_Run": {
+        "type": "Scope",
+        "runAfter": { "INIT_Variables": ["Succeeded"] },
+        "actions": {
+          "TABLES_Insert_Orchestration_Run": {
+            "type": "ServiceProvider",
+            "runAfter": {},
+            "inputs": {
+              "parameters": {
+                "tableName":    "DtsOrchestrationRuns",
+                "partitionKey": "@{triggerBody()?['workloadId']}",
+                "rowKey":       "@{variables('runId')}",
+                "entity": {
+                  "PartitionKey":     "@{triggerBody()?['workloadId']}",
+                  "RowKey":           "@{variables('runId')}",
+                  "WorkloadId":     "@triggerBody()?['workloadId']",
+                  "PartnerId":      "@triggerBody()?['partnerId']",
+                  "RunKind":          "Discovery",
+                  "Status":           "Running",
+                  "TriggerType":      "Schedule",
+                  "ScheduledSlotUtc": "@triggerBody()?['dispatchedAtUtc']",
+                  "WatermarkFromUtc": "@triggerBody()?['watermarkFromUtc']",
+                  "StartedAtUtc":     "@utcNow()",
+                  "PagesRead":        0,
+                  "CorrelationId":    "@triggerBody()?['correlationId']"
+                }
+              },
+              "serviceProviderConfiguration": {
+                "connectionName":    "azureTables",
+                "operationId":       "upsertEntity",
+                "serviceProviderId": "/serviceProviders/AzureTables"
+              }
+            }
+          },
+          "TABLES_Upsert_Runtime_State_Running": {
+            "type": "ServiceProvider",
+            "runAfter": { "TABLES_Insert_Orchestration_Run": ["Succeeded"] },
+            "inputs": {
+              "parameters": {
+                "tableName":    "DtsWorkloadRuntimeState",
+                "partitionKey": "@{triggerBody()?['workloadId']}",
+                "rowKey":       "@{triggerBody()?['workloadId']}",
+                "entity": {
+                  "PartitionKey":           "@{triggerBody()?['workloadId']}",
+                  "RowKey":                 "@{triggerBody()?['workloadId']}",
+                  "LastStatus":             "Running",
+                  "LastRunStartedUtc":      "@utcNow()",
+                  "LastOrchestrationRunId": "@variables('runId')"
+                }
+              },
+              "serviceProviderConfiguration": {
+                "connectionName":    "azureTables",
+                "operationId":       "upsertEntity",
+                "serviceProviderId": "/serviceProviders/AzureTables"
+              }
+            }
+          }
+        }
+      },
+
+      "SCOPE_Enumerate_And_Ingest": {
+        "type": "Scope",
+        "runAfter": { "SCOPE_Open_Run": ["Succeeded"] },
+        "actions": {
+
+          "TABLES_Get_Doc_Routing": {
+            "type": "ServiceProvider",
+            "runAfter": {},
+            "inputs": {
+              "parameters": {
+                "tableName":   "DtsWorkloadDocRouting",
+                "filterQuery": "@{concat('PartitionKey eq ''', triggerBody()?['workloadId'], ''' and IsEnabled eq true')}"
+              },
+              "serviceProviderConfiguration": {
+                "connectionName":    "azureTables",
+                "operationId":       "queryEntities",
+                "serviceProviderId": "/serviceProviders/AzureTables"
+              }
+            }
+          },
+
+          "COMPOSE_Get_Metadata_Request": {
+            "type": "Compose",
+            "runAfter": { "TABLES_Get_Doc_Routing": ["Succeeded"] },
+            "inputs": {
+              "function":        "GetDocumentsMetadata",
+              "sourceConfigCode": "@triggerBody()?['sourceConfigCode']",
+              "workloadId":      "@triggerBody()?['workloadId']",
+              "watermarkFrom":   "@triggerBody()?['watermarkFromUtc']",
+              "maxPagesPerRun":  "@coalesce(triggerBody()?['maxPagesPerRun'], 50)",
+              "filters": {
+                "extDocStatusesCsv":   "@triggerBody()?['extDocStatusesCsv']",
+                "extDocumentTypesCsv": "@triggerBody()?['extDocumentTypesCsv']",
+                "umrSearch":           "@triggerBody()?['umrSearch']"
+              },
+              "correlationId":   "@triggerBody()?['correlationId']"
+            }
+          },
+
+          "SWITCH_Get_Documents_Metadata": {
+            "type": "Switch",
+            "expression": "@toLower(triggerBody()?['sourceType'])",
+            "runAfter": { "COMPOSE_Get_Metadata_Request": ["Succeeded"] },
+            "cases": {
+              "partner_api": {
+                "case": "partner_api",
+                "actions": {
+                  "WORKFLOW_GetMetadata_PartnerApi": {
+                    "type": "Workflow",
+                    "runAfter": {},
+                    "inputs": {
+                      "host":   { "workflow": { "id": "wf-activity-partner-api-whitespace" } },
+                      "method": "POST",
+                      "body":   "@outputs('COMPOSE_Get_Metadata_Request')"
+                    }
+                  },
+                  "SET_GetDocs_Result": {
+                    "type": "SetVariable",
+                    "runAfter": { "WORKFLOW_GetMetadata_PartnerApi": ["Succeeded"] },
+                    "inputs": {
+                      "name":  "activityGetDocsResult",
+                      "value": "@body('WORKFLOW_GetMetadata_PartnerApi')?['body']"
+                    }
+                  }
+                }
+              },
+              "sharepoint": {
+                "case": "sharepoint",
+                "actions": {
+                  "WORKFLOW_GetMetadata_SharePoint": {
+                    "type": "Workflow",
+                    "inputs": {
+                      "host": { "workflow": { "id": "wf-activity-sharepoint" } },
+                      "method": "POST",
+                      "body": "@outputs('COMPOSE_Get_Metadata_Request')"
+                    },
+                    "runAfter": {}
+                  },
+                  "SET_GetDocs_Result_SP": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "activityGetDocsResult", "value": "@body('WORKFLOW_GetMetadata_SharePoint')?['body']" },
+                    "runAfter": { "WORKFLOW_GetMetadata_SharePoint": ["Succeeded"] }
+                  }
+                }
+              },
+              "sftp": {
+                "case": "sftp",
+                "actions": {
+                  "WORKFLOW_GetMetadata_Sftp": {
+                    "type": "Workflow",
+                    "inputs": {
+                      "host": { "workflow": { "id": "wf-activity-sftp" } },
+                      "method": "POST",
+                      "body": "@outputs('COMPOSE_Get_Metadata_Request')"
+                    },
+                    "runAfter": {}
+                  },
+                  "SET_GetDocs_Result_SFTP": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "activityGetDocsResult", "value": "@body('WORKFLOW_GetMetadata_Sftp')?['body']" },
+                    "runAfter": { "WORKFLOW_GetMetadata_Sftp": ["Succeeded"] }
+                  }
+                }
+              },
+              "blob_storage": {
+                "case": "blob_storage",
+                "actions": {
+                  "WORKFLOW_GetMetadata_BlobStorage": {
+                    "type": "Workflow",
+                    "inputs": {
+                      "host": { "workflow": { "id": "wf-activity-blob-storage" } },
+                      "method": "POST",
+                      "body": "@outputs('COMPOSE_Get_Metadata_Request')"
+                    },
+                    "runAfter": {}
+                  },
+                  "SET_GetDocs_Result_Blob": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "activityGetDocsResult", "value": "@body('WORKFLOW_GetMetadata_BlobStorage')?['body']" },
+                    "runAfter": { "WORKFLOW_GetMetadata_BlobStorage": ["Succeeded"] }
+                  }
+                }
+              },
+              "file_storage": {
+                "case": "file_storage",
+                "actions": {
+                  "WORKFLOW_GetMetadata_FileStorage": {
+                    "type": "Workflow",
+                    "inputs": {
+                      "host": { "workflow": { "id": "wf-activity-file-storage" } },
+                      "method": "POST",
+                      "body": "@outputs('COMPOSE_Get_Metadata_Request')"
+                    },
+                    "runAfter": {}
+                  },
+                  "SET_GetDocs_Result_File": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "activityGetDocsResult", "value": "@body('WORKFLOW_GetMetadata_FileStorage')?['body']" },
+                    "runAfter": { "WORKFLOW_GetMetadata_FileStorage": ["Succeeded"] }
+                  }
+                }
+              },
+              "network_share_drive": {
+                "case": "network_share_drive",
+                "actions": {
+                  "WORKFLOW_GetMetadata_NetworkShareDrive": {
+                    "type": "Workflow",
+                    "inputs": {
+                      "host": { "workflow": { "id": "wf-activity-network-share-drive" } },
+                      "method": "POST",
+                      "body": "@outputs('COMPOSE_Get_Metadata_Request')"
+                    },
+                    "runAfter": {}
+                  },
+                  "SET_GetDocs_Result_NSD": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "activityGetDocsResult", "value": "@body('WORKFLOW_GetMetadata_NetworkShareDrive')?['body']" },
+                    "runAfter": { "WORKFLOW_GetMetadata_NetworkShareDrive": ["Succeeded"] }
+                  }
+                }
+              },
+              "email": {
+                "case": "email",
+                "actions": {
+                  "WORKFLOW_GetMetadata_Email": {
+                    "type": "Workflow",
+                    "inputs": {
+                      "host": { "workflow": { "id": "wf-activity-email" } },
+                      "method": "POST",
+                      "body": "@outputs('COMPOSE_Get_Metadata_Request')"
+                    },
+                    "runAfter": {}
+                  },
+                  "SET_GetDocs_Result_Email": {
+                    "type": "SetVariable",
+                    "inputs": { "name": "activityGetDocsResult", "value": "@body('WORKFLOW_GetMetadata_Email')?['body']" },
+                    "runAfter": { "WORKFLOW_GetMetadata_Email": ["Succeeded"] }
+                  }
+                }
+              }
+            },
+            "default": {
+              "actions": {
+                "HTTP_Track_Unsupported_Source_Type_Event": {
+                  "type": "Http",
+                  "runAfter": {},
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "https://dc.services.visualstudio.com/v2/track",
+                    "retryPolicy": { "type": "none" },
+                    "body": {
+                      "name": "Microsoft.ApplicationInsights.Event",
+                      "time": "@utcNow()",
+                      "iKey": "@appsetting('appinsights_instrumentation_key')",
+                      "data": {
+                        "baseType": "EventData",
+                        "baseData": {
+                          "ver": 2,
+                          "name": "DTS_UnsupportedSourceType",
+                          "properties": {
+                            "workloadId":   "@{triggerBody()?['workloadId']}",
+                            "correlationId":  "@{triggerBody()?['correlationId']}",
+                            "sourceType": "@{triggerBody()?['sourceType']}"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+
+          "SET_WatermarkToUtc": {
+            "type": "SetVariable",
+            "runAfter": { "SWITCH_Get_Documents_Metadata": ["Succeeded"] },
+            "inputs": { "name": "watermarkToUtc", "value": "@coalesce(variables('activityGetDocsResult')?['watermarkTo'], '')" }
+          },
+
+          "FOREACH_Risk": {
+            "type": "Foreach",
+            "runAfter": { "SET_WatermarkToUtc": ["Succeeded"] },
+            "foreach": "@coalesce(variables('activityGetDocsResult')?['items'], createArray())",
+            "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+            "actions": {
+
+              "SET_RiskDocuments_Empty": {
+                "type": "SetVariable",
+                "inputs": { "name": "riskDocuments", "value": [] },
+                "runAfter": {}
+              },
+              "SET_CurrentRiskHasDocs_False": {
+                "type": "SetVariable",
+                "runAfter": { "SET_RiskDocuments_Empty": ["Succeeded"] },
+                "inputs": { "name": "currentRiskHasDocs", "value": false }
+              },
+
+              "COMPOSE_Risk_Folder_Path": {
+                "type": "Compose",
+                "runAfter": { "SET_CurrentRiskHasDocs_False": ["Succeeded"] },
+                "inputs": "@{replace(replace(replace(replace(coalesce(body('TABLES_Get_Doc_Routing')?['entities']?[0]?['DestinationPath'], concat(formatDateTime(coalesce(items('FOREACH_Risk')?['inceptionDate'], items('FOREACH_Risk')?['updatedAt'], utcNow()), 'yyyy'), '/', replace(replace(concat(coalesce(items('FOREACH_Risk')?['umr'], items('FOREACH_Risk')?['externalId']), ' - ', coalesce(items('FOREACH_Risk')?['insuredName'], items('FOREACH_Risk')?['externalId'])), '/', '_'), ':', '-'))), '{{yyyy/MM/dd}}', formatDateTime(triggerBody()?['dispatchedAtUtc'], 'yyyy/MM/dd')), '{{umr}}', replace(replace(replace(coalesce(items('FOREACH_Risk')?['umr'], items('FOREACH_Risk')?['externalId']), '/', '_'), '\\', '_'), ':', '-')), '{{insuredName}}', replace(replace(replace(coalesce(items('FOREACH_Risk')?['insuredName'], items('FOREACH_Risk')?['externalId']), '/', '_'), '\\', '_'), ':', '-')), '{{partnerExternalId}}', items('FOREACH_Risk')?['externalId'])}"
+              },
+
+              "TABLES_Upsert_Risk": {
+                "type": "ServiceProvider",
+                "runAfter": { "COMPOSE_Risk_Folder_Path": ["Succeeded"] },
+                "inputs": {
+                  "parameters": {
+                    "tableName":    "DtsRisks",
+                    "partitionKey": "@{triggerBody()?['workloadId']}",
+                    "rowKey":       "@{items('FOREACH_Risk')?['externalId']}",
+                    "entity": {
+                      "PartitionKey":             "@{triggerBody()?['workloadId']}",
+                      "RowKey":                   "@{items('FOREACH_Risk')?['externalId']}",
+                      "WorkloadId":               "@triggerBody()?['workloadId']",
+                      "PartnerId":                "@triggerBody()?['partnerId']",
+                      "ExternalId":           "@items('FOREACH_Risk')?['externalId']",
+                      "Umr":                      "@items('FOREACH_Risk')?['umr']",
+                      "InsuredName":              "@items('FOREACH_Risk')?['insuredName']",
+                      "InceptionDate":            "@items('FOREACH_Risk')?['inceptionDate']",
+                      "ExternalLastUpdatedAtUtc": "@items('FOREACH_Risk')?['updatedAt']",
+                      "RelativeFolderPath":       "@outputs('COMPOSE_Risk_Folder_Path')",
+                      "FolderYear":               "@formatDateTime(coalesce(items('FOREACH_Risk')?['inceptionDate'], items('FOREACH_Risk')?['updatedAt'], utcNow()), 'yyyy')",
+                      "LastSeenRunId":            "@variables('runId')"
+                    }
+                  },
+                  "serviceProviderConfiguration": {
+                    "connectionName":    "azureTables",
+                    "operationId":       "upsertEntity",
+                    "serviceProviderId": "/serviceProviders/AzureTables"
+                  }
+                }
+              },
+
+              "TABLES_Get_Existing_Doc_Versions": {
+                "type": "ServiceProvider",
+                "runAfter": { "TABLES_Upsert_Risk": ["Succeeded"] },
+                "inputs": {
+                  "parameters": {
+                    "tableName":   "DtsDocuments",
+                    "filterQuery": "@{concat('PartitionKey eq ''', triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'], '''')}"
+                  },
+                  "serviceProviderConfiguration": {
+                    "connectionName":    "azureTables",
+                    "operationId":       "queryEntities",
+                    "serviceProviderId": "/serviceProviders/AzureTables"
+                  }
+                }
+              },
+
+              "SET_Reset_BundleDownloadResults": {
+                "type": "SetVariable",
+                "runAfter": { "TABLES_Get_Existing_Doc_Versions": ["Succeeded"] },
+                "inputs": { "name": "bundleDownloadResults", "value": [] }
+              },
+
+              "SWITCH_Prefetch_Bundle": {
+                "type": "Switch",
+                "expression": "@toLower(triggerBody()?['sourceType'])",
+                "runAfter": { "SET_Reset_BundleDownloadResults": ["Succeeded"] },
+                "cases": {
+                  "partner_api": {
+                    "case": "partner_api",
+                    "actions": {
+                      "COMPOSE_Bundle_Request": {
+                        "type": "Compose",
+                        "runAfter": {},
+                        "inputs": {
+                          "function":               "DownloadRiskBundle",
+                          "sourceConfigCode":       "@triggerBody()?['sourceConfigCode']",
+                          "workloadId":           "@triggerBody()?['workloadId']",
+                          "externalId":                 "@items('FOREACH_Risk')?['externalId']",
+                          "containerDirectoryPath": "@outputs('COMPOSE_Risk_Folder_Path')",
+                          "documents":              "@items('FOREACH_Risk')?['documents']",
+                          "correlationId":          "@{concat(triggerBody()?['correlationId'], '/', items('FOREACH_Risk')?['externalId'])}"
+                        }
+                      },
+                      "WORKFLOW_PartnerApi_DownloadRiskBundle": {
+                        "type": "Workflow",
+                        "runAfter": { "COMPOSE_Bundle_Request": ["Succeeded"] },
+                        "inputs": {
+                          "host":   { "workflow": { "id": "wf-activity-partner-api-whitespace" } },
+                          "method": "POST",
+                          "body":   "@outputs('COMPOSE_Bundle_Request')"
+                        }
+                      },
+                      "SET_BundleDownloadResults": {
+                        "type": "SetVariable",
+                        "runAfter": { "WORKFLOW_PartnerApi_DownloadRiskBundle": ["Succeeded"] },
+                        "inputs": { "name": "bundleDownloadResults", "value": "@body('WORKFLOW_PartnerApi_DownloadRiskBundle')?['body']" }
+                      }
+                    }
+                  }
+                },
+                "default": { "actions": {} }
+              },
+
+              "FOREACH_Document": {
+                "type": "Foreach",
+                "runAfter": { "SWITCH_Prefetch_Bundle": ["Succeeded"] },
+                "foreach": "@coalesce(items('FOREACH_Risk')?['documents'], createArray())",
+                "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+                "actions": {
+                  "IF_Doc_Is_New_Or_Changed": {
+                    "type": "If",
+                    "expression": {
+                      "and": [
+                        {
+                          "not": {
+                            "contains": [
+                              "@string(body('TABLES_Get_Existing_Doc_Versions')?['entities'])",
+                              "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}"
+                            ]
+                          }
+                        },
+                        {
+                          "or": [
+                            { "equals": ["@{coalesce(triggerBody()?['extDocStatusesCsv'], '')}", ""] },
+                            { "contains": [
+                                "@{concat(',', coalesce(triggerBody()?['extDocStatusesCsv'], ''), ',')}",
+                                "@{concat(',', items('FOREACH_Document')?['status'], ',')}"
+                            ]}
+                          ]
+                        }
+                      ]
+                    },
+                    "runAfter": {},
+                    "actions": {
+
+                      "SCOPE_Try_Doc": {
+                        "type": "Scope",
+                        "runAfter": {},
+                        "actions": {
+
+                          "TABLES_Register_Risk_Document": {
+                            "type": "ServiceProvider",
+                            "runAfter": {},
+                            "inputs": {
+                              "parameters": {
+                                "tableName":    "DtsDocuments",
+                                "partitionKey": "@{concat(triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'])}",
+                                "rowKey":       "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}",
+                                "entity": {
+                                  "PartitionKey":             "@{concat(triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'])}",
+                                  "RowKey":                   "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}",
+                                  "WorkloadId":               "@triggerBody()?['workloadId']",
+                                  "PartnerId":                "@triggerBody()?['partnerId']",
+                                  "ExternalRiskId":       "@items('FOREACH_Risk')?['externalId']",
+                                  "ExternalId":               "@items('FOREACH_Document')?['externalId']",
+                                  "ExternalDocumentId":        "@items('FOREACH_Document')?['documentId']",
+                                  "ExternalRevision":          "@items('FOREACH_Document')?['revision']",
+                                  "ExternalDigest":            "@items('FOREACH_Document')?['digest']",
+                                  "OriginalFileName":         "@items('FOREACH_Document')?['fileName']",
+                                  "DeclaredContentType":      "@items('FOREACH_Document')?['contentType']",
+                                  "SizeBytes":                "@items('FOREACH_Document')?['sizeBytes']",
+                                  "RelativeFolderPath":       "@outputs('COMPOSE_Risk_Folder_Path')",
+                                  "Status":                   "Discovered",
+                                  "DocumentKind":             "@items('FOREACH_Document')?['documentKind']",
+                                  "ExternalStatus":           "@items('FOREACH_Document')?['status']",
+                                  "ExternalType":             "@items('FOREACH_Document')?['externalType']",
+                                  "PlacementType":            "@items('FOREACH_Document')?['placementType']",
+                                  "ExternalLastUpdatedAtUtc": "@items('FOREACH_Document')?['lastUpdatedAt']",
+                                  "DiscoveredAtUtc":          "@utcNow()",
+                                  "DiscoveryRunId":           "@variables('runId')"
+                                }
+                              },
+                              "serviceProviderConfiguration": {
+                                "connectionName":    "azureTables",
+                                "operationId":       "upsertEntity",
+                                "serviceProviderId": "/serviceProviders/AzureTables"
+                              }
+                            }
+                          },
+
+                          "COMPOSE_Download_Request": {
+                            "type": "Compose",
+                            "runAfter": { "TABLES_Register_Risk_Document": ["Succeeded"] },
+                            "inputs": {
+                              "function":               "DownloadDocumentToStaging",
+                              "sourceConfigCode":       "@triggerBody()?['sourceConfigCode']",
+                              "workloadId":           "@triggerBody()?['workloadId']",
+                              "externalId":                 "@items('FOREACH_Risk')?['externalId']",
+                              "documentId":             "@items('FOREACH_Document')?['documentId']",
+                              "parentDocumentId":       "@items('FOREACH_Document')?['parentDocumentId']",
+                              "revision":               "@items('FOREACH_Document')?['revision']",
+                              "fileName":               "@items('FOREACH_Document')?['fileName']",
+                              "contentType":            "@items('FOREACH_Document')?['contentType']",
+                              "digest":                 "@items('FOREACH_Document')?['digest']",
+                              "externalType":           "@items('FOREACH_Document')?['externalType']",
+                              "containerDirectoryPath": "@outputs('COMPOSE_Risk_Folder_Path')",
+                              "correlationId":          "@{concat(triggerBody()?['correlationId'], '/', items('FOREACH_Risk')?['externalId'])}"
+                            }
+                          },
+
+                          "SWITCH_Download_Document_To_Staging": {
+                            "type": "Switch",
+                            "expression": "@toLower(triggerBody()?['sourceType'])",
+                            "runAfter": { "COMPOSE_Download_Request": ["Succeeded"] },
+                            "cases": {
+                              "partner_api": {
+                                "case": "partner_api",
+                                "actions": {
+                                  "FILTER_Download_Result": {
+                                    "type": "Query",
+                                    "runAfter": {},
+                                    "inputs": {
+                                      "from":  "@variables('bundleDownloadResults')",
+                                      "where": "@equals(item()?['documentId'], items('FOREACH_Document')?['documentId'])"
+                                    }
+                                  },
+                                  "SET_Download_Result": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                      "name":  "downloadActivityResult",
+                                      "value": "@first(body('FILTER_Download_Result'))"
+                                    },
+                                    "runAfter": { "FILTER_Download_Result": ["Succeeded"] }
+                                  }
+                                }
+                              },
+                              "sharepoint": {
+                                "case": "sharepoint",
+                                "actions": {
+                                  "WORKFLOW_Download_SharePoint": {
+                                    "type": "Workflow",
+                                    "inputs": {
+                                      "host": { "workflow": { "id": "wf-activity-sharepoint" } },
+                                      "method": "POST",
+                                      "body": "@outputs('COMPOSE_Download_Request')"
+                                    },
+                                    "runAfter": {}
+                                  },
+                                  "SET_Download_Result_SP": {
+                                    "type": "SetVariable",
+                                    "inputs": { "name": "downloadActivityResult", "value": "@body('WORKFLOW_Download_SharePoint')?['body']" },
+                                    "runAfter": { "WORKFLOW_Download_SharePoint": ["Succeeded"] }
+                                  }
+                                }
+                              },
+                              "sftp": {
+                                "case": "sftp",
+                                "actions": {
+                                  "WORKFLOW_Download_Sftp": {
+                                    "type": "Workflow",
+                                    "inputs": {
+                                      "host": { "workflow": { "id": "wf-activity-sftp" } },
+                                      "method": "POST",
+                                      "body": "@outputs('COMPOSE_Download_Request')"
+                                    },
+                                    "runAfter": {}
+                                  },
+                                  "SET_Download_Result_SFTP": {
+                                    "type": "SetVariable",
+                                    "inputs": { "name": "downloadActivityResult", "value": "@body('WORKFLOW_Download_Sftp')?['body']" },
+                                    "runAfter": { "WORKFLOW_Download_Sftp": ["Succeeded"] }
+                                  }
+                                }
+                              },
+                              "blob_storage": {
+                                "case": "blob_storage",
+                                "actions": {
+                                  "WORKFLOW_Download_BlobStorage": {
+                                    "type": "Workflow",
+                                    "inputs": {
+                                      "host": { "workflow": { "id": "wf-activity-blob-storage" } },
+                                      "method": "POST",
+                                      "body": "@outputs('COMPOSE_Download_Request')"
+                                    },
+                                    "runAfter": {}
+                                  },
+                                  "SET_Download_Result_Blob": {
+                                    "type": "SetVariable",
+                                    "inputs": { "name": "downloadActivityResult", "value": "@body('WORKFLOW_Download_BlobStorage')?['body']" },
+                                    "runAfter": { "WORKFLOW_Download_BlobStorage": ["Succeeded"] }
+                                  }
+                                }
+                              },
+                              "file_storage": {
+                                "case": "file_storage",
+                                "actions": {
+                                  "WORKFLOW_Download_FileStorage": {
+                                    "type": "Workflow",
+                                    "inputs": {
+                                      "host": { "workflow": { "id": "wf-activity-file-storage" } },
+                                      "method": "POST",
+                                      "body": "@outputs('COMPOSE_Download_Request')"
+                                    },
+                                    "runAfter": {}
+                                  },
+                                  "SET_Download_Result_File": {
+                                    "type": "SetVariable",
+                                    "inputs": { "name": "downloadActivityResult", "value": "@body('WORKFLOW_Download_FileStorage')?['body']" },
+                                    "runAfter": { "WORKFLOW_Download_FileStorage": ["Succeeded"] }
+                                  }
+                                }
+                              },
+                              "network_share_drive": {
+                                "case": "network_share_drive",
+                                "actions": {
+                                  "WORKFLOW_Download_NetworkShareDrive": {
+                                    "type": "Workflow",
+                                    "inputs": {
+                                      "host": { "workflow": { "id": "wf-activity-network-share-drive" } },
+                                      "method": "POST",
+                                      "body": "@outputs('COMPOSE_Download_Request')"
+                                    },
+                                    "runAfter": {}
+                                  },
+                                  "SET_Download_Result_NSD": {
+                                    "type": "SetVariable",
+                                    "inputs": { "name": "downloadActivityResult", "value": "@body('WORKFLOW_Download_NetworkShareDrive')?['body']" },
+                                    "runAfter": { "WORKFLOW_Download_NetworkShareDrive": ["Succeeded"] }
+                                  }
+                                }
+                              },
+                              "email": {
+                                "case": "email",
+                                "actions": {
+                                  "WORKFLOW_Download_Email": {
+                                    "type": "Workflow",
+                                    "inputs": {
+                                      "host": { "workflow": { "id": "wf-activity-email" } },
+                                      "method": "POST",
+                                      "body": "@outputs('COMPOSE_Download_Request')"
+                                    },
+                                    "runAfter": {}
+                                  },
+                                  "SET_Download_Result_Email": {
+                                    "type": "SetVariable",
+                                    "inputs": { "name": "downloadActivityResult", "value": "@body('WORKFLOW_Download_Email')?['body']" },
+                                    "runAfter": { "WORKFLOW_Download_Email": ["Succeeded"] }
+                                  }
+                                }
+                              }
+                            },
+                            "default": { "actions": {} }
+                          },
+
+                          "IF_Requires_Immutable_Record": {
+                            "type": "If",
+                            "runAfter": { "SWITCH_Download_Document_To_Staging": ["Succeeded"] },
+                            "expression": {
+                              "and": [{ "equals": ["@coalesce(triggerBody()?['requiresImmutableRecord'], true)", true] }]
+                            },
+                            "actions": {
+                              "BLOB_Get_From_Staging": {
+                                "type": "ServiceProvider",
+                                "runAfter": {},
+                                "inputs": {
+                                  "parameters": {
+                                    "containerName": "@appsetting('blob_staging_container')",
+                                    "blobName":      "@variables('downloadActivityResult')?['stagingBlobPath']"
+                                  },
+                                  "serviceProviderConfiguration": {
+                                    "connectionName":    "azureBlob",
+                                    "operationId":       "readBlob",
+                                    "serviceProviderId": "/serviceProviders/AzureBlob"
+                                  }
+                                }
+                              },
+                              "BLOB_Upload_To_Records": {
+                                "type": "ServiceProvider",
+                                "runAfter": { "BLOB_Get_From_Staging": ["Succeeded"] },
+                                "inputs": {
+                                  "parameters": {
+                                    "containerName": "@appsetting('blob_records_container')",
+                                    "blobName":      "@variables('downloadActivityResult')?['stagingBlobPath']",
+                                    "content":       "@body('BLOB_Get_From_Staging')",
+                                    "overwrite":     false,
+                                    "metadata": {
+                                      "workloadcode":      "@{triggerBody()?['workloadId']}",
+                                      "partnerexternalid": "@{items('FOREACH_Risk')?['externalId']}",
+                                      "partnerdocumentid": "@{items('FOREACH_Document')?['documentId']}",
+                                      "partnerrevision":   "@{items('FOREACH_Document')?['revision']}",
+                                      "partnerdigest":     "@{items('FOREACH_Document')?['digest']}"
+                                    }
+                                  },
+                                  "serviceProviderConfiguration": {
+                                    "connectionName":    "azureBlob",
+                                    "operationId":       "uploadBlob",
+                                    "serviceProviderId": "/serviceProviders/AzureBlob"
+                                  }
+                                }
+                              }
+                            },
+                            "else": { "actions": {} }
+                          },
+
+                          "TABLES_Update_Document_Version_Downloaded": {
+                            "type": "ServiceProvider",
+                            "runAfter": { "IF_Requires_Immutable_Record": ["Succeeded"] },
+                            "inputs": {
+                              "parameters": {
+                                "tableName":    "DtsDocuments",
+                                "partitionKey": "@{concat(triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'])}",
+                                "rowKey":       "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}",
+                                "entity": {
+                                  "PartitionKey":    "@{concat(triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'])}",
+                                  "RowKey":          "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}",
+                                  "Status":          "Downloaded",
+                                  "StagingBlobPath": "@variables('downloadActivityResult')?['stagingBlobPath']",
+                                  "RecordBlobPath":  "@variables('downloadActivityResult')?['stagingBlobPath']",
+                                  "DownloadedAtUtc": "@utcNow()"
+                                }
+                              },
+                              "serviceProviderConfiguration": {
+                                "connectionName":    "azureTables",
+                                "operationId":       "upsertEntity",
+                                "serviceProviderId": "/serviceProviders/AzureTables"
+                              }
+                            }
+                          },
+
+                          "SET_CurrentRiskHasDocs_True": {
+                            "type": "SetVariable",
+                            "runAfter": { "TABLES_Update_Document_Version_Downloaded": ["Succeeded"] },
+                            "inputs": { "name": "currentRiskHasDocs", "value": true }
+                          },
+
+                          "SET_Append_RiskDocument": {
+                            "type": "SetVariable",
+                            "runAfter": { "SET_CurrentRiskHasDocs_True": ["Succeeded"] },
+                            "inputs": {
+                              "name":  "riskDocuments",
+                              "value": "@concat(variables('riskDocuments'), array(createObject('stagingBlobPath', variables('downloadActivityResult')?['stagingBlobPath'], 'digest', items('FOREACH_Document')?['digest'], 'documentId', items('FOREACH_Document')?['documentId'], 'parentDocumentId', items('FOREACH_Document')?['parentDocumentId'], 'revision', items('FOREACH_Document')?['revision'], 'fileName', items('FOREACH_Document')?['fileName'], 'contentType', items('FOREACH_Document')?['contentType'])))"
+                            }
+                          }
+
+                        }
+                      },
+
+                      "SCOPE_Catch_Doc": {
+                        "type": "Scope",
+                        "runAfter": { "SCOPE_Try_Doc": ["Failed", "TimedOut", "Skipped"] },
+                        "actions": {
+                          "TABLES_Update_Document_Discovery_Failed": {
+                            "type": "ServiceProvider",
+                            "runAfter": {},
+                            "inputs": {
+                              "parameters": {
+                                "tableName":    "DtsDocuments",
+                                "partitionKey": "@{concat(triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'])}",
+                                "rowKey":       "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}",
+                                "entity": {
+                                  "PartitionKey": "@{concat(triggerBody()?['workloadId'], '|', items('FOREACH_Risk')?['externalId'])}",
+                                  "RowKey":       "@{concat(items('FOREACH_Document')?['documentId'], '|', items('FOREACH_Document')?['revision'])}",
+                                  "Status":       "Failed",
+                                  "FailedReason": "DISCOVERY_ERROR",
+                                  "FailedAtUtc":  "@utcNow()"
+                                }
+                              },
+                              "serviceProviderConfiguration": {
+                                "connectionName":    "azureTables",
+                                "operationId":       "upsertEntity",
+                                "serviceProviderId": "/serviceProviders/AzureTables"
+                              }
+                            }
+                          },
+
+                          "HTTP_Track_Doc_Discovery_Failed_Event": {
+                            "type": "Http",
+                            "runAfter": { "TABLES_Update_Document_Discovery_Failed": ["Succeeded", "Failed"] },
+                            "inputs": {
+                              "method": "POST",
+                              "uri": "https://dc.services.visualstudio.com/v2/track",
+                              "retryPolicy": { "type": "none" },
+                              "body": {
+                                "name": "Microsoft.ApplicationInsights.Event",
+                                "time": "@utcNow()",
+                                "iKey": "@appsetting('appinsights_instrumentation_key')",
+                                "data": {
+                                  "baseType": "EventData",
+                                  "baseData": {
+                                    "ver": 2,
+                                    "name": "DTS_DocumentDiscoveryFailed",
+                                    "properties": {
+                                      "workloadId":  "@{triggerBody()?['workloadId']}",
+                                      "correlationId": "@{triggerBody()?['correlationId']}",
+                                      "externalId":        "@{items('FOREACH_Risk')?['externalId']}",
+                                      "documentId":    "@{items('FOREACH_Document')?['documentId']}",
+                                      "error":         "@{result('SCOPE_Try_Doc')?[0]?['error']?['message']}"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+
+                    },
+                    "else": { "actions": {} }
+                  }
+                }
+              },
+
+              "IF_Risk_Has_New_Documents": {
+                "type": "If",
+                "runAfter": { "FOREACH_Document": ["Succeeded", "Failed"] },
+                "expression": { "and": [{ "equals": ["@variables('currentRiskHasDocs')", true] }] },
+                "actions": {
+                  "COMPOSE_Delivery_Message": {
+                    "type": "Compose",
+                    "runAfter": {},
+                    "inputs": {
+                      "workloadId":            "@triggerBody()?['workloadId']",
+                      "externalId":                "@items('FOREACH_Risk')?['externalId']",
+                      "runId":                 "@variables('runId')",
+                      "partnerId":           "@triggerBody()?['partnerId']",
+                      "correlationId":         "@{concat(triggerBody()?['correlationId'], '/', items('FOREACH_Risk')?['externalId'])}",
+                      "enableNotification":    "@triggerBody()?['enableNotification']",
+                      "notificationType":      "@triggerBody()?['notificationType']",
+                      "notifyOnErrorsOnly":    "@triggerBody()?['notifyOnErrorsOnly']",
+                      "notificationRecipient": "@triggerBody()?['notificationRecipient']",
+                      "requestedAt":           "@utcNow()",
+                      "isReplay":              false,
+                      "documents":             "@variables('riskDocuments')"
+                    }
+                  },
+                  "SB_Publish_Delivery_Request": {
+                    "type": "ServiceProvider",
+                    "runAfter": { "COMPOSE_Delivery_Message": ["Succeeded"] },
+                    "inputs": {
+                      "parameters": {
+                        "entityName": "@appsetting('sbus_topic_dlv_requests')",
+                        "message": {
+                          "contentData":  "@outputs('COMPOSE_Delivery_Message')",
+                          "contentType":  "application/json",
+                          "messageId":    "@{concat(triggerBody()?['workloadId'], '-', items('FOREACH_Risk')?['externalId'], '-', utcNow('yyyyMMddHHmm'))}",
+                          "userProperties": {
+                            "workloadId":      "@triggerBody()?['workloadId']",
+                            "partnerExternalId": "@items('FOREACH_Risk')?['externalId']"
+                          }
+                        }
+                      },
+                      "serviceProviderConfiguration": {
+                        "connectionName":    "serviceBus",
+                        "operationId":       "sendMessage",
+                        "serviceProviderId": "/serviceProviders/serviceBus"
+                      }
+                    }
+                  }
+                },
+                "else": { "actions": {} }
+              }
+
+            }
+          }
+
+        }
+      },
+
+      "SCOPE_Close_Run": {
+        "type": "Scope",
+        "runAfter": { "SCOPE_Enumerate_And_Ingest": ["Succeeded", "Failed", "TimedOut"] },
+        "actions": {
+
+          "COMPOSE_Enumeration_Complete": {
+            "type": "Compose",
+            "runAfter": {},
+            "inputs": "@equals(result('SCOPE_Enumerate_And_Ingest')[0]['status'], 'Succeeded')"
+          },
+
+          "TABLES_Update_Orchestration_Run": {
+            "type": "ServiceProvider",
+            "runAfter": { "COMPOSE_Enumeration_Complete": ["Succeeded"] },
+            "inputs": {
+              "parameters": {
+                "tableName":    "DtsOrchestrationRuns",
+                "partitionKey": "@{triggerBody()?['workloadId']}",
+                "rowKey":       "@variables('runId')",
+                "entity": {
+                  "PartitionKey":        "@{triggerBody()?['workloadId']}",
+                  "RowKey":              "@{variables('runId')}",
+                  "Status":              "@if(equals(result('SCOPE_Enumerate_And_Ingest')[0]['status'], 'Succeeded'), 'Completed', 'Failed')",
+                  "CompletedAtUtc":      "@utcNow()",
+                  "PagesRead":           "@coalesce(variables('activityGetDocsResult')?['pagesRead'], 0)",
+                  "EnumerationComplete": "@outputs('COMPOSE_Enumeration_Complete')"
+                }
+              },
+              "serviceProviderConfiguration": {
+                "connectionName":    "azureTables",
+                "operationId":       "upsertEntity",
+                "serviceProviderId": "/serviceProviders/AzureTables"
+              }
+            }
+          },
+
+          "IF_Should_Advance_Watermark": {
+            "type": "If",
+            "runAfter": { "TABLES_Update_Orchestration_Run": ["Succeeded"] },
+            "expression": {
+              "and": [
+                { "equals": ["@outputs('COMPOSE_Enumeration_Complete')", true] },
+                { "not": { "equals": ["@variables('watermarkToUtc')", ""] } }
+              ]
+            },
+            "actions": {
+              "TABLES_Upsert_Runtime_State_Completed_With_Watermark": {
+                "type": "ServiceProvider",
+                "runAfter": {},
+                "inputs": {
+                  "parameters": {
+                    "tableName":    "DtsWorkloadRuntimeState",
+                    "partitionKey": "@{triggerBody()?['workloadId']}",
+                    "rowKey":       "@{triggerBody()?['workloadId']}",
+                    "entity": {
+                      "PartitionKey":          "@{triggerBody()?['workloadId']}",
+                      "RowKey":                "@{triggerBody()?['workloadId']}",
+                      "LastStatus":            "Completed",
+                      "LastRunCompletedUtc":   "@utcNow()",
+                      "LastSuccessfulRunUtc":  "@utcNow()",
+                      "CommittedWatermarkUtc": "@variables('watermarkToUtc')"
+                    }
+                  },
+                  "serviceProviderConfiguration": {
+                    "connectionName":    "azureTables",
+                    "operationId":       "upsertEntity",
+                    "serviceProviderId": "/serviceProviders/AzureTables"
+                  }
+                }
+              }
+            },
+            "else": {
+              "actions": {
+                "TABLES_Upsert_Runtime_State_Completed": {
+                  "type": "ServiceProvider",
+                  "runAfter": {},
+                  "inputs": {
+                    "parameters": {
+                      "tableName":    "DtsWorkloadRuntimeState",
+                      "partitionKey": "@{triggerBody()?['workloadId']}",
+                      "rowKey":       "@{triggerBody()?['workloadId']}",
+                      "entity": {
+                        "PartitionKey":        "@{triggerBody()?['workloadId']}",
+                        "RowKey":              "@{triggerBody()?['workloadId']}",
+                        "LastStatus":          "@if(equals(result('SCOPE_Enumerate_And_Ingest')[0]['status'], 'Succeeded'), 'Completed', 'Failed')",
+                        "LastRunCompletedUtc": "@utcNow()"
+                      }
+                    },
+                    "serviceProviderConfiguration": {
+                      "connectionName":    "azureTables",
+                      "operationId":       "upsertEntity",
+                      "serviceProviderId": "/serviceProviders/AzureTables"
+                    }
+                  }
+                }
+              }
+            }
+          },
+
+          "IF_Run_Failed_Telemetry": {
+            "type": "If",
+            "runAfter": { "IF_Should_Advance_Watermark": ["Succeeded", "Failed"] },
+            "expression": {
+              "and": [{ "equals": ["@result('SCOPE_Enumerate_And_Ingest')[0]['status']", "Failed"] }]
+            },
+            "actions": {
+              "HTTP_Track_Discovery_Run_Failed_Event": {
+                "type": "Http",
+                "runAfter": {},
+                "inputs": {
+                  "method": "POST",
+                  "uri": "https://dc.services.visualstudio.com/v2/track",
+                  "retryPolicy": { "type": "none" },
+                  "body": {
+                    "name": "Microsoft.ApplicationInsights.Event",
+                    "time": "@utcNow()",
+                    "iKey": "@appsetting('appinsights_instrumentation_key')",
+                    "data": {
+                      "baseType": "EventData",
+                      "baseData": {
+                        "ver": 2,
+                        "name": "DTS_DiscoveryRunFailed",
+                        "properties": {
+                          "workloadId":  "@{triggerBody()?['workloadId']}",
+                          "correlationId": "@{triggerBody()?['correlationId']}",
+                          "runId":         "@{variables('runId')}",
+                          "pagesRead":     "@{coalesce(variables('activityGetDocsResult')?['pagesRead'], 0)}"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "else": { "actions": {} }
+          }
+
+        }
+      },
+
+      "Response": {
+        "type": "Response",
+        "runAfter": { "SCOPE_Close_Run": ["Succeeded", "Failed"] },
+        "inputs": {
+          "statusCode": "@if(equals(result('SCOPE_Enumerate_And_Ingest')[0]['status'], 'Succeeded'), 200, 500)",
+          "body": {
+            "workloadId":          "@triggerBody()?['workloadId']",
+            "runId":               "@variables('runId')",
+            "pagesRead":           "@coalesce(variables('activityGetDocsResult')?['pagesRead'], 0)",
+            "enumerationComplete": "@outputs('COMPOSE_Enumeration_Complete')",
+            "watermarkToUtc":      "@variables('watermarkToUtc')",
+            "status":              "@result('SCOPE_Enumerate_And_Ingest')[0]['status']"
+          }
+        }
+      }
+
+    },
+    "outputs": {}
+  },
+  "kind": "Stateful"
+}
