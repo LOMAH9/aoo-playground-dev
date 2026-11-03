@@ -1,13 +1,16 @@
-                                    "SET_Abort_Loop_On_API_Error": {
-                                        "type": "SetVariable",
+                                    "COMPOSE_Base_Body": {
+                                        "type": "Compose",
                                         "inputs": {
-                                            "name": "pageMoreItems",
-                                            "value": false
+                                            "statuses": "@split(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], 'Signed,Endorsement'), ',')"
                                         },
+                                        "runAfter": {}
+                                    },
+                                    "COMPOSE_Page_Request_Body": {
+                                        "type": "Compose",
+                                        "inputs": "@if(empty(trim(coalesce(triggerBody()?['filters']?['umrSearch'], ''))), outputs('COMPOSE_Base_Body'), setProperty(outputs('COMPOSE_Base_Body'), 'umrSearch', triggerBody()?['filters']?['umrSearch']))",
                                         "runAfter": {
-                                            "HTTP_Get_Risks_Summary_Page": [
-                                                "Failed",
-                                                "TimedOut"
+                                            "COMPOSE_Base_Body": [
+                                                "Succeeded"
                                             ]
                                         }
-                                    }
+                                    },
