@@ -1,1 +1,13 @@
-        "inputs": "@{if(empty(trim(coalesce(triggerBody()?['partnerExternalId'], ''))), concat('WorkloadId eq ''', triggerBody()?['workloadId'], ''' and Status eq ''Failed''', if(empty(trim(coalesce(triggerBody()?['routingName'], ''))), '', concat(' and DestinationConfigCode eq ''', triggerBody()?['routingName'], ''''))), concat('PartitionKey eq ''', triggerBody()?['workloadId'], '|', triggerBody()?['partnerExternalId'], ''' and Status eq ''Failed''', if(empty(trim(coalesce(triggerBody()?['routingName'], ''))), '', concat(' and DestinationConfigCode eq ''', triggerBody()?['routingName'], ''''))))}"
+                                    "SET_Abort_Loop_On_API_Error": {
+                                        "type": "SetVariable",
+                                        "inputs": {
+                                            "name": "pageMoreItems",
+                                            "value": false
+                                        },
+                                        "runAfter": {
+                                            "HTTP_Get_Risks_Summary_Page": [
+                                                "Failed",
+                                                "TimedOut"
+                                            ]
+                                        }
+                                    }
