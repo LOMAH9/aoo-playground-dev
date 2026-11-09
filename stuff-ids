@@ -1,302 +1,52 @@
-                    "documents":     [
-                      {
-                        "documentId":       "@item()?['name']",
-                        "parentDocumentId": null,
-                        "revision":         "@item()?['properties']?['etag']",
-                        "fileName":         "@last(split(item()?['name'], '/'))",
-                        "digest":           "@item()?['properties']?['contentMD5']",
-                        "contentType":      "@item()?['properties']?['contentType']",
-                        "sizeBytes":        "@item()?['properties']?['contentLength']"
-                      }
-                    ]
+              "TABLES_Get_Existing_Risk": {
+                "type": "ServiceProvider",
+                "runAfter": { "SET_CurrentRiskHasDocs_False": ["Succeeded"] },
+                "inputs": {
+                  "parameters": {
+                    "tableName":   "DtsRisks",
+                    "filterQuery": "@{concat('PartitionKey eq ''', triggerBody()?['workloadId'], ''' and RowKey eq ''', items('FOREACH_Risk')?['externalId'], '''')}"
+                  },
+                  "serviceProviderConfiguration": {
+                    "connectionName":    "azureTables",
+                    "operationId":       "queryEntities",
+                    "serviceProviderId": "/serviceProviders/AzureTables"
+                  }
+                }
+              },
 
 -=============================================================================================================
 
-{
-    "definition": {
-        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-        "contentVersion": "1.0.0.0",
-        "triggers": {
-            "HTTP_Trigger": {
-                "type": "Request",
-                "kind": "Http",
-                "inputs": {
-                    "schema": {
-                        "type": "object",
-                        "required": [
-                            "function",
-                            "sourceConfigCode",
-                            "correlationId"
-                        ],
-                        "properties": {
-                            "function": {
-                                "type": "string",
-                                "enum": [
-                                    "GetDocumentsMetadata",
-                                    "UploadFromPath",
-                                    "DownloadRiskBundle"
-                                ]
-                            },
-                            "sourceConfigCode": {
-                                "type": "string"
-                            },
-                            "workloadId": {
-                                "type": "string"
-                            },
-                            "watermarkFrom": {
-                                "type": "string"
-                            },
-                            "maxPagesPerRun": {
-                                "type": "integer"
-                            },
-                            "filters": {
-                                "type": "object",
-                                "properties": {
-                                    "extDocStatusesCsv": {
-                                        "type": "string"
-                                    },
-                                    "extDocumentTypesCsv": {
-                                        "type": "string"
-                                    },
-                                    "umrSearch": {
-                                        "type": "string"
-                                    }
-                                }
-                            },
-                            "externalId": {
-                                "type": "string"
-                            },
-                            "documentId": {
-                                "type": "string"
-                            },
-                            "parentDocumentId": {
-                                "type": "string"
-                            },
-                            "revision": {
-                                "type": "string"
-                            },
-                            "fileName": {
-                                "type": "string"
-                            },
-                            "contentType": {
-                                "type": "string"
-                            },
-                            "digest": {
-                                "type": "string"
-                            },
-                            "externalType": {
-                                "type": "string"
-                            },
-                            "containerDirectoryPath": {
-                                "type": "string"
-                            },
-                            "sourceBlobPath": {
-                                "type": "string"
-                            },
-                            "correlationId": {
-                                "type": "string"
-                            },
-                            "documents": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "documentId": {
-                                            "type": "string"
-                                        },
-                                        "externalType": {
-                                            "type": "string"
-                                        },
-                                        "fileName": {
-                                            "type": "string"
-                                        },
-                                        "contentType": {
-                                            "type": "string"
-                                        },
-                                        "digest": {
-                                            "type": "string"
-                                        },
-                                        "revision": {
-                                            "type": "string"
-                                        },
-                                        "parentDocumentId": {
-                                            "type": "string"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "actions": {
-            "INIT_Variables": {
-                "type": "InitializeVariable",
-                "inputs": {
-                    "variables": [
-                        {
-                            "name": "riskItems",
-                            "type": "array",
-                            "value": []
-                        },
-                        {
-                            "name": "apiBaseUrl",
-                            "type": "string",
-                            "value": "@{concat(if(empty(trim(coalesce(triggerBody()?['sourceConfigCode'], ''))), appsetting('apim_base_url'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::apim_base_url')), appsetting('apim_base_url'))), '/', if(empty(trim(coalesce(triggerBody()?['sourceConfigCode'], ''))), appsetting('whitespace_api_base_uri'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_base_uri')), appsetting('whitespace_api_base_uri'))))}"
-                        },
-                        {
-                            "name": "apimSubKey",
-                            "type": "string",
-                            "value": "@{if(empty(trim(coalesce(triggerBody()?['sourceConfigCode'], ''))), appsetting('whitespace_api_apim_subscription_key'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_apim_subscription_key')), appsetting('whitespace_api_apim_subscription_key')))}"
-                        },
-                        {
-                            "name": "correlationIdHeader",
-                            "type": "string",
-                            "value": "@{appsetting('correlation_id_header')}"
-                        },
-                        {
-                            "name": "correlationId",
-                            "type": "string",
-                            "value": "@{coalesce(triggerOutputs()?['headers']?[appsetting('correlation_id_header')], triggerBody()?['correlationId'], '')}"
-                        },
-                        {
-                            "name": "whitespaceAudienceId",
-                            "type": "string",
-                            "value": "@{if(empty(trim(coalesce(triggerBody()?['sourceConfigCode'], ''))), appsetting('whitespace_api_audience_id'), coalesce(appsetting(concat(triggerBody()?['sourceConfigCode'], '::whitespace_api_audience_id')), appsetting('whitespace_api_audience_id')))}"
-                        },
-                        {
-                            "name": "uploadedFiles",
-                            "type": "array",
-                            "value": []
-                        },
-                        {
-                            "name": "pageMoreItems",
-                            "type": "boolean",
-                            "value": true
-                        },
-                        {
-                            "name": "pageNextKey",
-                            "type": "string",
-                            "value": ""
-                        },
-                        {
-                            "name": "watermarkToInternal",
-                            "type": "string"
-                        },
-                        {
-                            "name": "pagesReadCount",
-                            "type": "integer",
-                            "value": 0
-                        },
-                        {
-                            "name": "currentDocuments",
-                            "type": "array",
-                            "value": []
-                        },
-                        {
-                            "name": "matchedDocument",
-                            "type": "object",
-                            "value": {}
-                        },
-                        {
-                            "name": "filesToStage",
-                            "type": "array",
-                            "value": []
-                        }
-                    ]
-                },
-                "runAfter": {}
-            },
-            "IF_Assert_CorrelationId_Consistent": {
+              "IF_Risk_Is_New_Or_Changed": {
                 "type": "If",
-                "expression": {
-                    "and": [
-                        {
-                            "not": {
-                                "empty": [
-                                    "@coalesce(triggerOutputs()?['headers']?[appsetting('correlation_id_header')], '')"
-                                ]
-                            }
-                        },
-                        {
-                            "not": {
-                                "empty": [
-                                    "@coalesce(triggerBody()?['correlationId'], '')"
-                                ]
-                            }
-                        },
-                        {
-                            "not": {
-                                "equals": [
-                                    "@triggerOutputs()?['headers']?[appsetting('correlation_id_header')]",
-                                    "@triggerBody()?['correlationId']"
-                                ]
-                            }
-                        }
-                    ]
-                },
-                "actions": {
-                    "Response_CorrelationId_Mismatch": {
-                        "type": "Response",
-                        "inputs": {
-                            "statusCode": 400,
-                            "body": {
-                                "error": "correlationId in request header and body must match when both are provided"
-                            }
-                        }
-                    },
-                    "Terminate_CorrelationId_Mismatch": {
-                        "type": "Terminate",
-                        "inputs": {
-                            "runStatus": "Failed",
-                            "runError": {
-                                "code": "CorrelationIdMismatch",
-                                "message": "correlationId header and body values differ"
-                            }
-                        },
-                        "runAfter": {
-                            "Response_CorrelationId_Mismatch": [
-                                "Succeeded"
-                            ]
-                        }
-                    }
-                },
-                "else": {
-                    "actions": {}
-                },
                 "runAfter": {
-                    "INIT_Variables": [
-                        "Succeeded"
-                    ]
-                }
-            },
-            "SWITCH_Function": {
-                "type": "Switch",
-                "expression": "@triggerBody()?['function']",
-                "default": {
-                    "actions": {
-                        "Response_Unsupported_Function": {
-                            "type": "Response",
-                            "inputs": {
-                                "statusCode": 400,
-                                "body": {
-                                    "error": "@{concat('Unsupported function: ', triggerBody()?['function'])}"
-                                }
-                            }
-                        }
-                    }
+                  "TABLES_Get_Existing_Doc_Versions": ["Succeeded"],
+                  "TABLES_Get_Existing_Risk": ["Succeeded"]
                 },
-                "cases": {
-                    "DownloadRiskBundle": {
-                        "actions": {
-                            "SET_Reset_UploadedFiles": {
-                                "type": "SetVariable",
-                                "inputs": {
-                                    "name": "uploadedFiles",
-                                    "value": []
-                                }
-                            },
+                "expression": {
+                  "or": [
+                    { "equals": ["@length(coalesce(body('TABLES_Get_Existing_Risk')?['entities'], createArray()))", 0] },
+                    { "not": { "equals": [
+                        "@coalesce(items('FOREACH_Risk')?['updatedAt'], '')",
+                        "@coalesce(body('TABLES_Get_Existing_Risk')?['entities']?[0]?['ExternalLastUpdatedAtUtc'], '')"
+                    ]}},
+                    { "not": { "equals": [
+                        "@length(coalesce(items('FOREACH_Risk')?['documents'], createArray()))",
+                        "@length(coalesce(body('TABLES_Get_Existing_Doc_Versions')?['entities'], createArray()))"
+                    ]}}
+                  ]
+                },
+
+
+
+
+
+
+
+
+
+
+
+
                             "SET_Reset_FilesToStage": {
                                 "type": "SetVariable",
                                 "inputs": {
