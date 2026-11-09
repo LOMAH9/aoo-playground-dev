@@ -1,40 +1,47 @@
-              "TABLES_Get_Existing_Risk": {
-                "type": "ServiceProvider",
-                "runAfter": { "SET_CurrentRiskHasDocs_False": ["Succeeded"] },
-                "inputs": {
-                  "parameters": {
-                    "tableName":   "DtsRisks",
-                    "filterQuery": "@{concat('PartitionKey eq ''', triggerBody()?['workloadId'], ''' and RowKey eq ''', items('FOREACH_Risk')?['externalId'], '''')}"
-                  },
-                  "serviceProviderConfiguration": {
-                    "connectionName":    "azureTables",
-                    "operationId":       "queryEntities",
-                    "serviceProviderId": "/serviceProviders/AzureTables"
-                  }
-                }
-              },
+{
+  "type": "Query",
+  "inputs": {
+    "from": "@coalesce(items('FOREACH_Page_Risk')?['docs'], createArray())",
+    "where": "@and(or(empty(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], '')), contains(concat(',', coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], ''), ','), concat(',', item()?['status'], ','))), or(empty(coalesce(triggerBody()?['filters']?['extDocumentTypesCsv'], '')), contains(concat(',', coalesce(triggerBody()?['filters']?['extDocumentTypesCsv'], ''), ','), concat(',', item()?['type'], ','))))"
+  }
+}
 
 -=============================================================================================================
 
-              "IF_Risk_Is_New_Or_Changed": {
-                "type": "If",
-                "runAfter": {
-                  "TABLES_Get_Existing_Doc_Versions": ["Succeeded"],
-                  "TABLES_Get_Existing_Risk": ["Succeeded"]
-                },
-                "expression": {
-                  "or": [
-                    { "equals": ["@length(coalesce(body('TABLES_Get_Existing_Risk')?['entities'], createArray()))", 0] },
-                    { "not": { "equals": [
-                        "@coalesce(items('FOREACH_Risk')?['updatedAt'], '')",
-                        "@coalesce(body('TABLES_Get_Existing_Risk')?['entities']?[0]?['ExternalLastUpdatedAtUtc'], '')"
-                    ]}},
-                    { "not": { "equals": [
-                        "@length(coalesce(items('FOREACH_Risk')?['documents'], createArray()))",
-                        "@length(coalesce(body('TABLES_Get_Existing_Doc_Versions')?['entities'], createArray()))"
-                    ]}}
-                  ]
-                },
+          {
+  "type": "Select",
+  "inputs": {
+    "from": "@body('FILTER_Matching_Docs')",
+    "select": {
+      "documentId": "@{concat(items('FOREACH_Page_Risk')?['rootID'], '|', item()?['type'])}",
+      "externalId": "@item()?['id']",
+      "externalType": "@item()?['type']",
+      "documentKind": "@if(equals(item()?['type'], 'RWAttachmentCollection'), 'Attachment', if(equals(item()?['status'], 'Endorsement'), 'Endorsement', 'Submission'))",
+      "placementType": "@item()?['placementType']",
+      "parentDocumentId": "@items('FOREACH_Page_Risk')?['rootID']",
+      "revision": "@coalesce(item()?['rev'], '1')",
+      "fileName": "@if(equals(item()?['type'], 'RWAttachmentCollection'), null, concat(replace(replace(coalesce(item()?['umr'], items('FOREACH_Page_Risk')?['rootID']), '/', '_'), ':', '-'), '.pdf'))",
+      "digest": null,
+      "contentType": "@if(equals(item()?['type'], 'RWAttachmentCollection'), null, 'application/pdf')",
+      "sizeBytes": 0,
+      "status": "@item()?['status']",
+      "lastUpdatedAt": "@item()?['lastUpdatedAt']"
+    }
+  },
+  "runAfter": {
+    "FILTER_Matching_Docs": [
+      "Succeeded"
+    ]
+  }
+}
+
+
+
+
+
+
+
+
 
 
 
