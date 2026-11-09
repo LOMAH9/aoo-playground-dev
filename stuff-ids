@@ -1,11 +1,14 @@
-{
-  "type": "Query",
-  "inputs": {
-    "from": "@coalesce(items('FOREACH_Page_Risk')?['docs'], createArray())",
-    "where": "@and(or(empty(coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], '')), contains(concat(',', coalesce(triggerBody()?['filters']?['extDocStatusesCsv'], ''), ','), concat(',', item()?['status'], ','))), or(empty(coalesce(triggerBody()?['filters']?['extDocumentTypesCsv'], '')), contains(concat(',', coalesce(triggerBody()?['filters']?['extDocumentTypesCsv'], ''), ','), concat(',', item()?['type'], ','))))"
-  }
-}
-
+              "EXEC_JS_Sanitize_Folder_Path": {
+                "type": "JavaScriptCode",
+                "runAfter": { "COMPOSE_Risk_Folder_Path": ["Succeeded"] },
+                "inputs": {
+                  "code": "var path = workflowContext.actions.COMPOSE_Risk_Folder_Path.outputs;\nvar segments = path.split('/');\nvar clean = segments.map(function(s) {\n  return s.replace(/[~#%&*:<>?\\\\{|}\"+,.\\n\\r]/g, '').replace(/\\s+/g, ' ').trim();\n}).join('/');\nreturn clean;",
+                  "explicitDependencies": {
+                    "actions": ["COMPOSE_Risk_Folder_Path"],
+                    "includeTrigger": false
+                  }
+                }
+              },
 -=============================================================================================================
 
           {
